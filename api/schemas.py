@@ -1,0 +1,76 @@
+"""Pydantic request/response models for the product-matching API."""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class MatchSuggestion(BaseModel):
+    """A single ranked match suggestion for an unmatched product."""
+
+    match_id: int
+    rank: int
+    barcode: str
+    name: str
+    confidence_score: float
+    confidence_label: str
+    confidence_color: str
+    explanation: str
+
+
+class MatchResponse(BaseModel):
+    """Next pending product with its top match suggestions."""
+
+    product_id: int
+    product_name: str
+    brand: str | None = None
+    weight: str | None = None
+    suggestions: list[MatchSuggestion]
+
+
+class DecisionRequest(BaseModel):
+    """Operator approval or rejection of a match suggestion."""
+
+    decision: Literal["approved", "rejected"]
+    note: str | None = None
+
+
+class DecisionResponse(BaseModel):
+    """Result of recording an operator decision."""
+
+    success: bool
+    next_pending_count: int
+
+
+class StatsResponse(BaseModel):
+    """Aggregate pipeline and review statistics."""
+
+    total_products: int
+    barcoded: int
+    unmatched: int
+    matched: int
+    pending: int
+    auto_approved: int
+    operator_approved: int
+    rejected: int
+    match_rate: float
+    avg_confidence: float
+
+
+class HealthResponse(BaseModel):
+    """Service health and queue snapshot."""
+
+    status: str
+    products_indexed: int
+    pending_reviews: int
+
+
+class BatchProcessResponse(BaseModel):
+    """Counts from a full auto-triage batch run."""
+
+    auto_approved: int = Field(description="Suggestions with confidence > 0.90")
+    auto_rejected: int = Field(description="Suggestions with confidence < 0.60")
+    pending: int = Field(description="Suggestions in the 0.60–0.90 review band")
+    total_suggestions: int

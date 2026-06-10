@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Local databases and generated indexes (rebuild with pipeline)
+data/matching.db
+data/matcher_index/
+data/reference_embeddings.npy
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Streamlit local secrets (use Cloud dashboard instead)
+.streamlit/secrets.toml
