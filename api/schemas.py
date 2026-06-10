@@ -74,3 +74,40 @@ class BatchProcessResponse(BaseModel):
     auto_rejected: int = Field(description="Suggestions with confidence < 0.60")
     pending: int = Field(description="Suggestions in the 0.60–0.90 review band")
     total_suggestions: int
+
+
+class ConfidenceBuckets(BaseModel):
+    """Match counts per confidence band (rank-1 suggestions)."""
+
+    high: int = Field(description="Scores >= 0.90")
+    medium: int = Field(description="Scores 0.60–0.90")
+    low: int = Field(description="Scores < 0.60")
+
+
+class TimelinePoint(BaseModel):
+    """One point on the cumulative approval timeline."""
+
+    time: str
+    cumulative: int
+
+
+class RecentDecisionRow(BaseModel):
+    """Flattened row for the recent decisions table."""
+
+    product_name: str
+    matched_to: str
+    confidence: float
+    decision: str
+    time: str
+
+
+class AnalyticsResponse(BaseModel):
+    """Full analytics payload for the Streamlit dashboard."""
+
+    stats: StatsResponse
+    catalog_total: int = Field(default=100_585, description="Full catalogue row count")
+    auto_rejected: int
+    confidence_scores: list[float]
+    confidence_buckets: ConfidenceBuckets
+    timeline: list[TimelinePoint]
+    recent_decisions: list[RecentDecisionRow]

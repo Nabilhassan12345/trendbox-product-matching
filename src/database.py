@@ -325,6 +325,61 @@ def save_matches(matches: List[Dict[str, Any]]) -> int:
     return len(records)
 
 
+def replace_matches(matches: List[Dict[str, Any]]) -> int:
+    """Replace all match suggestions in a single transaction.
+
+    Clears existing decisions and matches, then inserts the new batch.
+    If ``matches`` is empty, existing rows are left unchanged.
+
+    Args:
+        matches: List of match record dictionaries (same schema as :func:`save_matches`).
+
+    Returns:
+        Number of rows inserted, or ``0`` when ``matches`` is empty.
+    """
+    if not matches:
+        logger.warning("replace_matches called with empty list — keeping existing matches")
+        return 0
+
+    required_keys = {
+        "unmatched_product_id",
+        "suggested_product_id",
+        "tfidf_score",
+        "embedding_score",
+        "confidence_score",
+        "confidence_label",
+        "rank",
+        "status",
+    }
+
+    records: List[Match] = []
+    for item in matches:
+        missing = required_keys - item.keys()
+        if missing:
+            raise ValueError(f"Match record missing keys: {sorted(missing)}")
+
+        records.append(
+            Match(
+                unmatched_product_id=int(item["unmatched_product_id"]),
+                suggested_product_id=int(item["suggested_product_id"]),
+                tfidf_score=float(item["tfidf_score"]),
+                embedding_score=float(item["embedding_score"]),
+                confidence_score=float(item["confidence_score"]),
+                confidence_label=str(item["confidence_label"]),
+                rank=int(item["rank"]),
+                status=str(item["status"]),
+            )
+        )
+
+    with get_session() as session:
+        session.query(Decision).delete()
+        session.query(Match).delete()
+        session.add_all(records)
+
+    logger.info("Replaced match table with %s records", f"{len(records):,}")
+    return len(records)
+
+
 def get_next_pending() -> Optional[Dict[str, Any]]:
     """Return the oldest pending match for human review.
 
@@ -436,6 +491,50 @@ def get_recent_decisions(limit: int = 20) -> List[Dict[str, Any]]:
             .all()
         )
         return [d.to_dict(include_match=True) for d in decisions]
+
+
+def get_confidence_scores(rank: int = 1) -> List[float]:
+    """Return confidence scores for all match rows at the given rank."""
+    with get_session() as session:
+        rows = (
+            session.query(Match.confidence_score)
+            .filter(Match.rank == rank)
+            .all()
+        )
+        return [float(row[0]) for row in rows]
+
+
+def get_approval_timeline() -> List[Dict[str, Any]]:
+    """Return cumulative approval counts over time (operator + auto-approved)."""
+    events: List[datetime] = []
+
+    with get_session() as session:
+        operator_times = (
+            session.query(Decision.decided_at)
+            .filter(Decision.decision == "approved")
+            .order_by(Decision.decided_at)
+            .all()
+        )
+        auto_times = (
+            session.query(Match.created_at)
+            .filter(Match.status == "auto_approved")
+            .order_by(Match.created_at)
+            .all()
+        )
+
+    events.extend(t[0] for t in operator_times if t[0])
+    events.extend(t[0] for t in auto_times if t[0])
+    events.sort()
+
+    timeline: List[Dict[str, Any]] = []
+    for index, event_time in enumerate(events, start=1):
+        timeline.append(
+            {
+                "time": event_time.isoformat(),
+                "cumulative": index,
+            }
+        )
+    return timeline
 
 
 if __name__ == "__main__":

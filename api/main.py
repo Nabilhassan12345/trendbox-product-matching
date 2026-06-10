@@ -13,16 +13,32 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func
 
 from api.schemas import (
+    AnalyticsResponse,
     BatchProcessResponse,
+    ConfidenceBuckets,
     DecisionRequest,
     DecisionResponse,
     HealthResponse,
     MatchResponse,
     MatchSuggestion,
+    RecentDecisionRow,
     StatsResponse,
+    TimelinePoint,
 )
 from src.confidence import get_confidence_color, triage
-from src.database import Decision, Match, Product, get_session, get_stats, init_db, save_decision, save_matches
+from src.database import (
+    Decision,
+    Match,
+    Product,
+    get_approval_timeline,
+    get_confidence_scores,
+    get_recent_decisions,
+    get_session,
+    get_stats,
+    init_db,
+    save_decision,
+    replace_matches,
+)
 from src.matcher import ProductMatcher
 
 logger = logging.getLogger(__name__)
@@ -192,6 +208,53 @@ def _pending_review_count() -> int:
     return int(get_stats().get("pending_review", 0))
 
 
+def _confidence_buckets(scores: list[float]) -> ConfidenceBuckets:
+    """Tally rank-1 confidence scores into triage bands."""
+    high = sum(1 for score in scores if score >= 0.90)
+    medium = sum(1 for score in scores if 0.60 <= score < 0.90)
+    low = sum(1 for score in scores if score < 0.60)
+    return ConfidenceBuckets(high=high, medium=medium, low=low)
+
+
+def _build_recent_decision_rows(limit: int = 20) -> list[RecentDecisionRow]:
+    """Flatten recent operator decisions for the analytics table."""
+    rows: list[RecentDecisionRow] = []
+    for item in get_recent_decisions(limit):
+        match = item.get("match") or {}
+        unmatched = match.get("unmatched_product") or {}
+        suggested = match.get("suggested_product") or {}
+        rows.append(
+            RecentDecisionRow(
+                product_name=str(unmatched.get("name", "—")),
+                matched_to=str(suggested.get("name", "—")),
+                confidence=float(match.get("confidence_score", 0.0)),
+                decision=str(item.get("decision", "")),
+                time=str(item.get("decided_at", "")),
+            )
+        )
+    return rows
+
+
+def _build_analytics_response() -> AnalyticsResponse:
+    """Assemble the full analytics dashboard payload."""
+    stats = _build_stats_response()
+    raw = get_stats()
+    status_counts = raw.get("matches_by_status", {})
+    auto_rejected = int(status_counts.get("auto_rejected", 0))
+    scores = get_confidence_scores(rank=1)
+    timeline = [TimelinePoint(**point) for point in get_approval_timeline()]
+
+    return AnalyticsResponse(
+        stats=stats,
+        catalog_total=100_585,
+        auto_rejected=auto_rejected,
+        confidence_scores=scores,
+        confidence_buckets=_confidence_buckets(scores),
+        timeline=timeline,
+        recent_decisions=_build_recent_decision_rows(20),
+    )
+
+
 @app.on_event("startup")
 def startup_load_matcher() -> None:
     """Initialise the database and load the matcher index from cache."""
@@ -269,15 +332,18 @@ def stats() -> StatsResponse:
     return _build_stats_response()
 
 
+@app.get("/analytics", response_model=AnalyticsResponse)
+def analytics() -> AnalyticsResponse:
+    """Return full analytics data for the Streamlit dashboard."""
+    return _build_analytics_response()
+
+
 @app.post("/batch_process", response_model=BatchProcessResponse)
 def batch_process() -> BatchProcessResponse:
     """Run matching for all unmatched products and auto-triage by confidence."""
     active_matcher = _require_matcher()
 
     with get_session() as session:
-        session.query(Decision).delete()
-        session.query(Match).delete()
-
         unmatched_products = [
             (product.id, product.name)
             for product in session.query(Product)
@@ -322,7 +388,7 @@ def batch_process() -> BatchProcessResponse:
                 }
             )
 
-    save_matches(records)
+    replace_matches(records)
     logger.info(
         "Batch process complete: %s suggestions (%s auto-approved, %s auto-rejected, %s pending)",
         len(records),

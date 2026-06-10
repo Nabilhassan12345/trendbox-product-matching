@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Streamlit runs this file as a script; add project root so `from ui.*` works.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import requests
 import streamlit as st
 
-from ui.api_client import get_api_url
+from ui.api_client import api_get, get_api_url, is_connection_error
+from ui.theme import inject_theme, show_offline
 
 st.set_page_config(
     page_title="Trendbox Matching",
@@ -13,33 +20,28 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+inject_theme()
 
 st.title("Trendbox Product Matching")
 st.caption("Two-stage retrieve-then-rerank pipeline for Turkish product names")
 
+health, health_offline = api_get("/health", timeout=5)
+if health_offline:
+    show_offline()
 
-def api_get(path: str) -> dict | None:
-    """GET from the FastAPI backend; return JSON or None on failure."""
-    try:
-        response = requests.get(f"{get_api_url()}{path}", timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as exc:
-        st.error(f"API request failed: {exc}")
-        return None
-
+if health is None:
+    st.error("Could not load health status from the API.")
+    st.stop()
 
 col1, col2, col3 = st.columns(3)
+col1.metric("Status", health["status"].upper())
+col2.metric("Products indexed", f"{health['products_indexed']:,}")
+col3.metric("Pending reviews", f"{health['pending_reviews']:,}")
 
-health = api_get("/health")
-if health:
-    col1.metric("Status", health["status"].upper())
-    col2.metric("Products indexed", f"{health['products_indexed']:,}")
-    col3.metric("Pending reviews", f"{health['pending_reviews']:,}")
-else:
+if health["pending_reviews"] == 0 and health["products_indexed"] > 0:
     st.warning(
-        "Cannot reach the API. Start it with:\n\n"
-        "`uvicorn api.main:app --reload --port 8000`"
+        "No match records in the review queue. Run batch processing below "
+        "(~70 minutes for the full catalogue)."
     )
 
 st.divider()
@@ -50,9 +52,9 @@ action_col1, action_col2 = st.columns(2)
 
 with action_col1:
     if st.button("Run batch process", type="primary", use_container_width=True):
-        with st.spinner("Matching all unmatched products…"):
+        with st.spinner("Matching all unmatched products — this can take ~70 minutes…"):
             try:
-                response = requests.post(f"{get_api_url()}/batch_process", timeout=3600)
+                response = requests.post(f"{get_api_url()}/batch_process", timeout=7200)
                 response.raise_for_status()
                 result = response.json()
                 st.success(
@@ -61,11 +63,16 @@ with action_col1:
                     f"{result['auto_rejected']:,} auto-rejected, "
                     f"{result['pending']:,} pending review"
                 )
+                st.rerun()
             except requests.RequestException as exc:
+                if is_connection_error(exc):
+                    show_offline()
                 st.error(f"Batch process failed: {exc}")
 
 with action_col2:
-    stats = api_get("/stats")
+    stats, stats_offline = api_get("/stats", timeout=5)
+    if stats_offline:
+        show_offline()
     if stats:
         st.markdown(
             f"**Match rate:** {stats['match_rate']:.1%}  \n"
@@ -73,4 +80,4 @@ with action_col2:
             f"**Unmatched:** {stats['unmatched']:,} · **Matched:** {stats['matched']:,}"
         )
 
-st.info("Use the sidebar pages **Review** and **Stats** to work the review queue.")
+st.info("Use the sidebar pages **Review** and **Analytics** to work the review queue.")

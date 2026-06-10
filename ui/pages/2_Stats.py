@@ -2,23 +2,29 @@
 
 from __future__ import annotations
 
-import requests
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import streamlit as st
 
-from ui.api_client import get_api_url
+from ui.api_client import api_get
+from ui.theme import inject_theme, page_hero, show_offline
 
-st.set_page_config(page_title="Stats", layout="wide")
-st.title("Pipeline statistics")
+st.set_page_config(page_title="Stats", layout="wide", initial_sidebar_state="expanded")
+inject_theme()
 
-if st.button("Refresh"):
+page_hero("Pipeline Statistics", "Aggregate matching and review counts from the API")
+
+if st.button("Refresh", use_container_width=False):
     st.rerun()
 
-try:
-    response = requests.get(f"{get_api_url()}/stats", timeout=30)
-    response.raise_for_status()
-    stats = response.json()
-except requests.RequestException as exc:
-    st.error(f"Failed to load stats: {exc}")
+stats, offline = api_get("/stats", timeout=5)
+if offline:
+    show_offline()
+if stats is None:
+    st.error("Could not load statistics from the API.")
     st.stop()
 
 col1, col2, col3, col4 = st.columns(4)

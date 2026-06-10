@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import requests
 import streamlit as st
 
-from ui.api_client import get_api_url
-
-CONFIDENCE_BADGE = {
-    "HIGH": "🟢 HIGH",
-    "MEDIUM": "🟡 MEDIUM",
-    "LOW": "🔴 LOW",
-}
-
-OFFLINE_MESSAGE = (
-    "⚠️ Cannot connect to backend. Make sure pipeline.py is running."
+from ui.api_client import api_get, api_post, get_api_url, is_connection_error
+from ui.theme import (
+    inject_theme,
+    page_hero,
+    confidence_pill,
+    show_offline,
 )
+
+ADVANCE_DELAY_SECONDS = 1.5
 
 
 def _init_session_state() -> None:
@@ -33,7 +35,6 @@ def _init_session_state() -> None:
         "current": None,
         "initial_pending": None,
         "reviewed_count": 0,
-        "api_online": True,
         "auto_advance": False,
         "last_toast": "",
     }
@@ -42,35 +43,16 @@ def _init_session_state() -> None:
             st.session_state[key] = value
 
 
-def _api_get(path: str) -> dict | None:
-    """GET from API; return None and mark offline on connection failure."""
-    try:
-        response = requests.get(f"{get_api_url()}{path}", timeout=30)
-        response.raise_for_status()
-        st.session_state.api_online = True
-        return response.json()
-    except requests.ConnectionError:
-        st.session_state.api_online = False
-        return None
-    except requests.RequestException:
-        st.session_state.api_online = True
-        return None
-
-
-def _load_next() -> dict | None:
-    """Fetch the next pending product from the review queue."""
+def _load_next() -> tuple[dict | None, bool]:
+    """Fetch the next pending product. Returns (payload, api_offline)."""
     try:
         response = requests.get(f"{get_api_url()}/match/next", timeout=30)
-        st.session_state.api_online = True
         if response.status_code == 404:
-            return None
+            return None, False
         response.raise_for_status()
-        return response.json()
-    except requests.ConnectionError:
-        st.session_state.api_online = False
-        return None
-    except requests.RequestException:
-        return None
+        return response.json(), False
+    except requests.RequestException as exc:
+        return None, is_connection_error(exc)
 
 
 def _submit_decision(
@@ -79,44 +61,20 @@ def _submit_decision(
     note: str = "",
     *,
     count_session: bool = True,
-) -> bool:
-    """POST an operator decision; optionally update session counters on success."""
-    try:
-        response = requests.post(
-            f"{get_api_url()}/decision/{match_id}",
-            json={"decision": decision, "note": note or None},
-            timeout=30,
-        )
-        response.raise_for_status()
-        st.session_state.api_online = True
-        if count_session:
-            if decision == "approved":
-                st.session_state.approved_today += 1
-            else:
-                st.session_state.rejected_today += 1
-            st.session_state.reviewed_count += 1
-        return True
-    except requests.ConnectionError:
-        st.session_state.api_online = False
-        return False
-    except requests.RequestException:
-        return False
-
-
-def _confidence_badge(label: str) -> str:
-    return CONFIDENCE_BADGE.get(label.upper(), f"⚪ {label}")
-
-
-def _render_tags(brand: str | None, weight: str | None) -> None:
-    tags = []
-    if brand:
-        tags.append(f"<span style='background:#E8F4FD;color:#1A5276;padding:4px 10px;"
-                      f"border-radius:12px;font-size:0.85rem;margin-right:6px;'>🏷 {brand}</span>")
-    if weight:
-        tags.append(f"<span style='background:#FEF9E7;color:#7D6608;padding:4px 10px;"
-                      f"border-radius:12px;font-size:0.85rem;'>⚖ {weight}</span>")
-    if tags:
-        st.markdown("".join(tags), unsafe_allow_html=True)
+) -> tuple[bool, bool]:
+    """POST an operator decision. Returns (success, api_offline)."""
+    ok, offline = api_post(
+        f"/decision/{match_id}",
+        json={"decision": decision, "note": note or None},
+        timeout=30,
+    )
+    if ok and count_session:
+        if decision == "approved":
+            st.session_state.approved_today += 1
+        else:
+            st.session_state.rejected_today += 1
+        st.session_state.reviewed_count += 1
+    return ok, offline
 
 
 def _operator_note() -> str:
@@ -124,116 +82,137 @@ def _operator_note() -> str:
 
 
 def _handle_decision(match_id: int, decision: str, message: str) -> None:
-    if _submit_decision(match_id, decision, _operator_note()):
+    ok, offline = _submit_decision(match_id, decision, _operator_note())
+    if offline:
+        show_offline()
+    if ok:
         st.session_state.last_toast = message
         st.session_state.auto_advance = True
         st.rerun()
 
 
-st.set_page_config(page_title="Operator Review", layout="wide", initial_sidebar_state="expanded")
+def _advance_after_decision() -> None:
+    """Show toast, wait, then load the next product."""
+    if not st.session_state.auto_advance:
+        return
+    if st.session_state.last_toast:
+        st.toast(st.session_state.last_toast, icon="✅")
+    time.sleep(ADVANCE_DELAY_SECONDS)
+    st.session_state.auto_advance = False
+    st.session_state.last_toast = ""
+    next_product, offline = _load_next()
+    if offline:
+        show_offline()
+    st.session_state.current = next_product
+    st.rerun()
+
+
+st.set_page_config(page_title="Operator Review", page_icon="🔍", layout="wide", initial_sidebar_state="expanded")
+inject_theme()
 _init_session_state()
 
-st.markdown(
-    """
-    <style>
-    div[data-testid="column"]:nth-of-type(2) button[kind="secondary"] {
-        background-color: #E74C3C;
-        color: white;
-        border: none;
-    }
-    div[data-testid="column"]:nth-of-type(2) button[kind="secondary"]:hover {
-        background-color: #C0392B;
-        color: white;
-        border: none;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+page_hero(
+    "Operator Review",
+    "Match unmatched Turkish products against the barcoded reference catalogue",
 )
 
-st.markdown("# 🔍 Trendbox Product Matching — Operator Review")
+stats, stats_offline = api_get("/stats", timeout=5)
+if stats_offline:
+    show_offline()
+if stats is None:
+    st.error("Could not load statistics from the API.")
+    st.stop()
 
-stats = _api_get("/stats")
 if stats and st.session_state.initial_pending is None:
     st.session_state.initial_pending = stats.get("pending", 0)
 
-if not st.session_state.api_online:
-    st.warning(OFFLINE_MESSAGE)
-    st.stop()
+pending_total = int(stats.get("pending", 0)) if stats else 0
+match_rate = float(stats.get("match_rate", 0.0)) if stats else 0.0
 
 with st.sidebar:
-    st.subheader("Session metrics")
-    pending_total = stats["pending"] if stats else 0
-    match_rate = stats["match_rate"] if stats else 0.0
-
+    st.markdown("#### Session metrics")
     st.metric("Total Pending", f"{pending_total:,}")
     st.metric("Approved Today", st.session_state.approved_today)
     st.metric("Rejected Today", st.session_state.rejected_today)
-    st.metric("Match Rate %", f"{match_rate:.1%}")
+    st.metric("Match Rate", f"{match_rate:.1%}")
 
-    if st.button("🔄 Refresh", use_container_width=True):
-        st.session_state.current = _load_next()
-        fresh_stats = _api_get("/stats")
-        if fresh_stats:
-            stats = fresh_stats
+    if st.button("🔄 Refresh", use_container_width=True, key="sidebar_refresh"):
+        next_product, offline = _load_next()
+        if offline:
+            show_offline()
+        st.session_state.current = next_product
         st.rerun()
 
-if st.session_state.auto_advance:
-    if st.session_state.last_toast:
-        st.toast(st.session_state.last_toast, icon="✅")
-    time.sleep(1.5)
-    st.session_state.auto_advance = False
-    st.session_state.last_toast = ""
-    st.session_state.current = _load_next()
-    st.rerun()
+_advance_after_decision()
 
 if st.session_state.current is None:
-    st.session_state.current = _load_next()
-
-if not st.session_state.api_online:
-    st.warning(OFFLINE_MESSAGE)
-    st.stop()
+    next_product, offline = _load_next()
+    if offline:
+        show_offline()
+    st.session_state.current = next_product
 
 current = st.session_state.current
 
 if current is None:
-    st.balloons()
-    st.success("✅ All products reviewed!")
+    total_matches = int(stats.get("auto_approved", 0)) + int(stats.get("rejected", 0)) + pending_total
+    if total_matches == 0:
+        st.warning(
+            "No match records in the database yet. Go to the **app** home page and "
+            "click **Run batch process** (~70 minutes for the full catalogue)."
+        )
+    else:
+        st.balloons()
+        st.success("All pending items reviewed!")
+        st.caption("The review queue is empty.")
     st.stop()
 
 left_col, right_col = st.columns(2, gap="large")
 
 with left_col:
-    st.markdown("### Product to Match")
-    st.markdown(f"## {current['product_name']}")
-    _render_tags(current.get("brand"), current.get("weight"))
+    brand = current.get("brand") or ""
+    weight = current.get("weight") or ""
+    tag_html = ""
+    if brand:
+        tag_html += f'<span class="tag tag-brand">🏷 {brand}</span>'
+    if weight:
+        tag_html += f'<span class="tag tag-weight">⚖ {weight}</span>'
     st.markdown(
-        f"<p style='color:#888;font-size:0.85rem;margin-top:12px;'>"
-        f"Product ID: {current['product_id']}</p>",
+        f'<div class="trendbox-panel">'
+        f'<div class="trendbox-panel-title">Product to Match</div>'
+        f'<p class="product-title">{current["product_name"]}</p>'
+        f"{tag_html}"
+        f'<p class="product-meta">Product ID · {current["product_id"]}</p>'
+        f"</div>",
         unsafe_allow_html=True,
     )
 
 with right_col:
-    st.markdown("### Top 3 Suggestions")
+    st.markdown('<div class="section-label">Top 3 Suggestions</div>', unsafe_allow_html=True)
     suggestions = current.get("suggestions", [])[:3]
 
     if not suggestions:
         st.info("No suggestions available for this product.")
     else:
         for suggestion in suggestions:
-            badge = _confidence_badge(suggestion["confidence_label"])
-            score = suggestion["confidence_score"]
+            label = suggestion.get("confidence_label", "MEDIUM")
+            score = float(suggestion.get("confidence_score", 0))
+            color = suggestion.get("confidence_color", "#64748b")
 
             with st.container(border=True):
-                st.markdown(f"**{badge}** · `{score:.3f}`")
-                st.markdown(f"**{suggestion['name']}**")
+                st.markdown(confidence_pill(label, score, color), unsafe_allow_html=True)
                 st.markdown(
-                    f"<span style='color:#888;font-size:0.9rem;'>"
-                    f"{suggestion['barcode']}</span>",
+                    f'<p class="suggestion-name">{suggestion["name"]}</p>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<p class="suggestion-barcode">{suggestion["barcode"]}</p>',
                     unsafe_allow_html=True,
                 )
                 if suggestion.get("explanation"):
-                    st.markdown(f"*_{suggestion['explanation']}_*")
+                    st.markdown(
+                        f'<p class="suggestion-explanation">{suggestion["explanation"]}</p>',
+                        unsafe_allow_html=True,
+                    )
 
                 if st.button(
                     "SELECT THIS MATCH",
@@ -249,35 +228,26 @@ with right_col:
 st.divider()
 
 btn_col1, btn_col2 = st.columns(2)
-
 top_match = next(
     (s for s in current.get("suggestions", []) if s.get("rank") == 1),
     current.get("suggestions", [{}])[0] if current.get("suggestions") else None,
 )
 
 with btn_col1:
-    if st.button("✅ APPROVE TOP MATCH", type="primary", use_container_width=True):
+    if st.button("✅ APPROVE TOP MATCH", type="primary", use_container_width=True, key="approve_top"):
         if top_match and top_match.get("match_id"):
-            _handle_decision(
-                top_match["match_id"],
-                "approved",
-                "Top match approved",
-            )
+            _handle_decision(top_match["match_id"], "approved", "Top match approved")
         else:
             st.error("No top match available.")
 
 with btn_col2:
-    if st.button("❌ REJECT ALL", use_container_width=True):
-        pending_ids = [
-            s["match_id"]
-            for s in current.get("suggestions", [])
-            if s.get("match_id")
-        ]
+    if st.button("❌ REJECT ALL", use_container_width=True, key="reject_all"):
+        pending_ids = [s["match_id"] for s in current.get("suggestions", []) if s.get("match_id")]
         if not pending_ids:
             st.error("Nothing to reject.")
         else:
             results = [
-                _submit_decision(match_id, "rejected", _operator_note(), count_session=False)
+                _submit_decision(match_id, "rejected", _operator_note(), count_session=False)[0]
                 for match_id in pending_ids
             ]
             if all(results):
@@ -288,14 +258,17 @@ with btn_col2:
                 st.rerun()
             elif any(results):
                 st.warning("Some suggestions could not be rejected.")
-            elif not st.session_state.api_online:
-                st.warning(OFFLINE_MESSAGE)
+            else:
+                show_offline()
 
-st.text_input("Operator note (optional)", key="operator_note", placeholder="Add context for this decision…")
+st.text_input(
+    "Operator note (optional)",
+    key="operator_note",
+    placeholder="Add context for this decision…",
+)
 
 initial = st.session_state.initial_pending or 0
 reviewed = st.session_state.reviewed_count
 total = max(initial, reviewed + pending_total)
 progress = min(reviewed / total, 1.0) if total else 0.0
-
 st.progress(progress, text=f"{reviewed} of {total} products reviewed")
