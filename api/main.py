@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -25,8 +27,11 @@ from api.schemas import (
     StatsResponse,
     TimelinePoint,
 )
-from src.confidence import get_confidence_color, triage
+from src.batch import process_unmatched
+from src.confidence import get_confidence_color
 from src.database import (
+    OPEN_STATUSES,
+    STATUS_PENDING,
     Decision,
     Match,
     Product,
@@ -43,12 +48,48 @@ from src.matcher import ProductMatcher
 
 logger = logging.getLogger(__name__)
 
+# Load variables from a local .env file if present (no-op when absent; never
+# overrides values already set in the environment, e.g. by pipeline.py or tests).
+load_dotenv()
+
 DB_PATH = os.getenv("TRENDBOX_DB_PATH", "data/matching.db")
 MATCHER_INDEX_PATH = os.getenv("TRENDBOX_MATCHER_INDEX", "data/matcher_index")
 TOP_SUGGESTIONS = 3
 
-app = FastAPI(title="Trendbox Product Matching API", version="1.0.0")
 matcher: ProductMatcher | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Initialise the database and load the matcher index from cache on startup."""
+    global matcher
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    init_db(DB_PATH)
+    logger.info("Database initialised at %s", DB_PATH)
+
+    matcher = ProductMatcher()
+    if os.path.isdir(MATCHER_INDEX_PATH):
+        matcher.load(MATCHER_INDEX_PATH)
+        logger.info("Matcher loaded from %s", MATCHER_INDEX_PATH)
+    else:
+        logger.warning(
+            "Matcher index not found at %s — run matcher.build() and save before matching",
+            MATCHER_INDEX_PATH,
+        )
+
+    yield
+
+
+app = FastAPI(
+    title="Trendbox Product Matching API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,22 +128,15 @@ def _require_matcher() -> ProductMatcher:
     return matcher
 
 
-def _triage_status(confidence_score: float) -> str:
-    """Map a confidence score to a persisted match status."""
-    action = triage(confidence_score)
-    if action == "auto_approve":
-        return "auto_approved"
-    if action == "auto_reject":
-        return "auto_rejected"
-    return "pending"
-
-
-def _get_pending_matches_for_product(unmatched_product_id: int) -> list[dict[str, Any]]:
-    """Return all pending match rows for an unmatched product, ordered by rank."""
+def _get_open_matches_for_product(unmatched_product_id: int) -> list[dict[str, Any]]:
+    """Return all still-open suggestions for a product (primary + alternatives)."""
     with get_session() as session:
         matches = (
             session.query(Match)
-            .filter(Match.unmatched_product_id == unmatched_product_id, Match.status == "pending")
+            .filter(
+                Match.unmatched_product_id == unmatched_product_id,
+                Match.status.in_(OPEN_STATUSES),
+            )
             .order_by(Match.rank)
             .limit(TOP_SUGGESTIONS)
             .all()
@@ -111,11 +145,15 @@ def _get_pending_matches_for_product(unmatched_product_id: int) -> list[dict[str
 
 
 def _get_next_pending_product_id() -> int | None:
-    """Return the unmatched product id for the next review queue item."""
+    """Return the unmatched product id for the next review queue item.
+
+    Only primary (rank-1) suggestions carry the ``pending`` status, so each
+    pending product appears in the queue exactly once.
+    """
     with get_session() as session:
         match = (
             session.query(Match)
-            .filter(Match.status == "pending")
+            .filter(Match.status == STATUS_PENDING)
             .order_by(Match.rank, Match.id)
             .first()
         )
@@ -124,7 +162,7 @@ def _get_next_pending_product_id() -> int | None:
 
 def _build_match_response(unmatched_product_id: int) -> MatchResponse:
     """Assemble a review payload for one unmatched product."""
-    pending_matches = _get_pending_matches_for_product(unmatched_product_id)
+    pending_matches = _get_open_matches_for_product(unmatched_product_id)
     if not pending_matches:
         raise HTTPException(status_code=404, detail="No pending matches for this product")
 
@@ -255,31 +293,6 @@ def _build_analytics_response() -> AnalyticsResponse:
     )
 
 
-@app.on_event("startup")
-def startup_load_matcher() -> None:
-    """Initialise the database and load the matcher index from cache."""
-    global matcher
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-    init_db(DB_PATH)
-    logger.info("Database initialised at %s", DB_PATH)
-
-    matcher = ProductMatcher()
-    index_path = MATCHER_INDEX_PATH
-    if os.path.isdir(index_path):
-        matcher.load(index_path)
-        logger.info("Matcher loaded from %s", index_path)
-    else:
-        logger.warning(
-            "Matcher index not found at %s — run matcher.build() and save before matching",
-            index_path,
-        )
-
-
 @app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
     """Send browser visitors to the interactive API docs."""
@@ -362,32 +375,7 @@ def batch_process() -> BatchProcessResponse:
             if barcode not in barcode_to_id:
                 barcode_to_id[barcode] = product_id
 
-    records: list[dict[str, Any]] = []
-    counts = {"auto_approved": 0, "auto_rejected": 0, "pending": 0}
-
-    for product_id, product_name in unmatched_products:
-        hits = active_matcher.match(product_name)[:TOP_SUGGESTIONS]
-        for hit in hits:
-            suggested_id = barcode_to_id.get(str(hit["barcode"]))
-            if suggested_id is None:
-                continue
-
-            status = _triage_status(hit["confidence_score"])
-            counts[status] += 1
-
-            records.append(
-                {
-                    "unmatched_product_id": product_id,
-                    "suggested_product_id": suggested_id,
-                    "tfidf_score": hit["tfidf_score"],
-                    "embedding_score": hit["embedding_score"],
-                    "confidence_score": hit["confidence_score"],
-                    "confidence_label": hit["confidence_label"],
-                    "rank": hit["rank"],
-                    "status": status,
-                }
-            )
-
+    records, counts = process_unmatched(active_matcher, unmatched_products, barcode_to_id)
     replace_matches(records)
     logger.info(
         "Batch process complete: %s suggestions (%s auto-approved, %s auto-rejected, %s pending)",
@@ -401,5 +389,6 @@ def batch_process() -> BatchProcessResponse:
         auto_approved=counts["auto_approved"],
         auto_rejected=counts["auto_rejected"],
         pending=counts["pending"],
+        total_products=counts["auto_approved"] + counts["auto_rejected"] + counts["pending"],
         total_suggestions=len(records),
     )

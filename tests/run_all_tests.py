@@ -24,6 +24,8 @@ REQUIRED_FILES = (
     "notebooks/02_experiments.ipynb",
     "pipeline.py",
     "tests/run_all_tests.py",
+    "tests/test_preprocess.py",
+    "tests/test_matcher.py",
     "tests/test_api.py",
     "data/mix_products.csv",
     "requirements.txt",
@@ -97,11 +99,11 @@ def check_data_load() -> bool:
         return False
 
 
-def run_api_tests() -> bool:
-    """Run the FastAPI integration test suite."""
-    print("\n=== API integration tests ===\n")
+def _run_test_file(filename: str, header: str) -> bool:
+    """Run a standalone test file as a subprocess; pass on exit code 0."""
+    print(f"\n=== {header} ===\n")
     result = subprocess.run(
-        [sys.executable, str(ROOT / "tests" / "test_api.py")],
+        [sys.executable, str(ROOT / "tests" / filename)],
         cwd=str(ROOT),
     )
     return result.returncode == 0
@@ -113,7 +115,9 @@ def main() -> int:
         check_files(),
         check_imports(),
         check_data_load(),
-        run_api_tests(),
+        _run_test_file("test_preprocess.py", "Preprocessing unit tests"),
+        _run_test_file("test_matcher.py", "Matcher end-to-end tests"),
+        _run_test_file("test_api.py", "API integration tests"),
     ]
     passed = sum(results)
     total = len(results)

@@ -68,12 +68,17 @@ class HealthResponse(BaseModel):
 
 
 class BatchProcessResponse(BaseModel):
-    """Counts from a full auto-triage batch run."""
+    """Counts from a full auto-triage batch run.
 
-    auto_approved: int = Field(description="Suggestions with confidence > 0.90")
-    auto_rejected: int = Field(description="Suggestions with confidence < 0.60")
-    pending: int = Field(description="Suggestions in the 0.60–0.90 review band")
-    total_suggestions: int
+    Triage is decided per product from its best (rank-1) candidate, so the band
+    counts are *products*, not individual suggestions.
+    """
+
+    auto_approved: int = Field(description="Products whose best match scored > 0.90")
+    auto_rejected: int = Field(description="Products whose best match scored < 0.60")
+    pending: int = Field(description="Products whose best match is in the 0.60–0.90 review band")
+    total_products: int = Field(description="Products triaged (sum of the three bands)")
+    total_suggestions: int = Field(description="Total suggestion rows persisted (incl. alternatives)")
 
 
 class ConfidenceBuckets(BaseModel):

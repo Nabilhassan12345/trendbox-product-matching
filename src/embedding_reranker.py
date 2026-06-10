@@ -164,6 +164,31 @@ class EmbeddingReranker:
             elapsed,
         )
 
+    def set_reference(self, reference_df: pd.DataFrame, embeddings: np.ndarray) -> None:
+        """Attach a precomputed reference set and build the FAISS index.
+
+        Useful when embeddings are already available (e.g. sliced from a cached
+        matrix during evaluation) and re-encoding would be wasteful.
+
+        Args:
+            reference_df: Reference catalogue rows, aligned row-for-row with
+                ``embeddings``.
+            embeddings: Embedding matrix of shape ``(len(reference_df), dim)``.
+
+        Raises:
+            ValueError: If row counts do not match.
+        """
+        if len(reference_df) != len(embeddings):
+            raise ValueError(
+                f"reference_df ({len(reference_df)}) and embeddings "
+                f"({len(embeddings)}) must have equal length"
+            )
+        self.reference_df = reference_df.reset_index(drop=True).copy()
+        self.embeddings = self._ensure_unit_norm(np.asarray(embeddings, dtype=np.float32))
+        self.index = faiss.IndexFlatIP(self.embeddings.shape[1])
+        self.index.add(self.embeddings)
+        logger.info("Reference set attached: %s vectors", f"{self.index.ntotal:,}")
+
     def _require_index(self) -> None:
         """Raise if the FAISS index has not been built."""
         if self.index is None or self.reference_df is None:
@@ -178,12 +203,30 @@ class EmbeddingReranker:
             return candidates["name"].tolist()
         raise ValueError("candidates must contain 'name_clean' or 'name'")
 
+    def _candidate_vectors(self, candidates: pd.DataFrame) -> np.ndarray:
+        """Return embedding vectors for candidates.
+
+        Reuses the cached reference embedding matrix when the candidates carry a
+        ``ref_index`` column (the fast path used by the two-stage pipeline);
+        otherwise encodes the candidate names on the fly.
+        """
+        if "ref_index" in candidates.columns and self.embeddings is not None:
+            indices = candidates["ref_index"].to_numpy()
+            if indices.max(initial=-1) < len(self.embeddings):
+                return self.embeddings[indices]
+        return self.encode(self._candidate_names(candidates), show_progress_bar=False)
+
     def rerank(self, query: str, candidates: pd.DataFrame) -> pd.DataFrame:
         """Rerank TF-IDF candidates by embedding cosine similarity.
 
+        The query is encoded once; candidate vectors are looked up from the
+        cached reference embeddings when available (avoiding a re-encode of all
+        candidates on every query).
+
         Args:
             query: Normalised query product name.
-            candidates: Stage-1 candidate DataFrame (must include name text).
+            candidates: Stage-1 candidate DataFrame (must include ``ref_index``
+                or name text).
 
         Returns:
             Copy of ``candidates`` with ``embedding_score`` added, sorted
@@ -192,14 +235,11 @@ class EmbeddingReranker:
         if candidates.empty:
             return candidates.copy()
 
-        candidate_texts = self._candidate_names(candidates)
-        # Encode query + candidates in one batch for consistency and speed.
-        all_vecs = self.encode([query] + candidate_texts, show_progress_bar=False)
-        query_vec = all_vecs[0:1]
-        candidate_vecs = all_vecs[1:]
+        query_vec = self.encode([query], show_progress_bar=False)[0]
+        candidate_vecs = self._candidate_vectors(candidates)
 
         # Unit-normalised vectors → inner product equals cosine similarity ∈ [-1, 1].
-        scores = np.clip((candidate_vecs @ query_vec.T).ravel(), -1.0, 1.0)
+        scores = np.clip(candidate_vecs @ query_vec, -1.0, 1.0)
 
         reranked = candidates.copy()
         reranked["embedding_score"] = scores
@@ -233,20 +273,24 @@ class EmbeddingReranker:
         candidate_tokens = set(candidate.lower().split())
         return sorted(query_tokens & candidate_tokens)
 
-    def explain_match(self, query: str, candidate: str) -> Dict[str, Any]:
-        """Produce a human-readable explanation for a query–candidate pair.
+    def build_explanation(
+        self, query: str, candidate: str, similarity: float
+    ) -> Dict[str, Any]:
+        """Build a match explanation from an already-known similarity score.
+
+        Use this when the embedding similarity has already been computed (e.g.
+        by :meth:`rerank`) to avoid re-encoding the pair.
 
         Args:
             query: Normalised query product name.
             candidate: Normalised (or raw) candidate product name.
+            similarity: Precomputed embedding cosine similarity in ``[-1, 1]``.
 
         Returns:
             Dict with ``embedding_similarity``, ``common_words``,
             ``brand_match``, ``weight_match``, and ``explanation``.
         """
-        vecs = self.encode([query, candidate], show_progress_bar=False)
-        similarity = float(np.clip((vecs[1:2] @ vecs[0:1].T)[0, 0], -1.0, 1.0))
-
+        similarity = float(np.clip(similarity, -1.0, 1.0))
         common = self._common_words(query, candidate)
         query_brand = extract_brand(query)
         query_weight = extract_weight(query)
@@ -274,6 +318,25 @@ class EmbeddingReranker:
             "weight_match": weight_match,
             "explanation": " | ".join(parts),
         }
+
+    def explain_match(self, query: str, candidate: str) -> Dict[str, Any]:
+        """Produce a human-readable explanation for a query–candidate pair.
+
+        Encodes the pair to compute similarity, then delegates to
+        :meth:`build_explanation`. Prefer :meth:`build_explanation` when the
+        similarity is already known.
+
+        Args:
+            query: Normalised query product name.
+            candidate: Normalised (or raw) candidate product name.
+
+        Returns:
+            Dict with ``embedding_similarity``, ``common_words``,
+            ``brand_match``, ``weight_match``, and ``explanation``.
+        """
+        vecs = self.encode([query, candidate], show_progress_bar=False)
+        similarity = float((vecs[1:2] @ vecs[0:1].T)[0, 0])
+        return self.build_explanation(query, candidate, similarity)
 
     def save_index(self, path: str) -> None:
         """Persist the FAISS index and reference DataFrame.

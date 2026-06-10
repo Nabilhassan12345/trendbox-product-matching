@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.confidence import triage
-from src.database import Match, Product, get_session, init_db, load_products, replace_matches
+from src.batch import process_unmatched
+from src.database import Product, get_session, init_db, load_products, replace_matches
 from src.matcher import ProductMatcher
 from src.preprocess import load_and_clean
 
@@ -198,15 +198,6 @@ def _sync_matcher_index(matcher: ProductMatcher) -> None:
     matcher.save(str(MATCHER_INDEX_DIR))
 
 
-def _triage_status(confidence_score: float) -> str:
-    action = triage(confidence_score)
-    if action == "auto_approve":
-        return "auto_approved"
-    if action == "auto_reject":
-        return "auto_rejected"
-    return "pending"
-
-
 def _run_batch_processing(matcher: ProductMatcher) -> dict[str, int]:
     start = _step("Step 7 — Batch processing (match + triage)")
     if not matcher._built:
@@ -236,36 +227,9 @@ def _run_batch_processing(matcher: ProductMatcher) -> dict[str, int]:
         _fail("No unmatched products in database.", "Check data/mix_products.csv has rows without barcodes.")
 
     print(f"  Matching {total:,} unmatched products (this may take a while)…")
-    records: list[dict[str, Any]] = []
-    counts = {"auto_approved": 0, "auto_rejected": 0, "pending": 0}
     batch_start = time.perf_counter()
 
-    for index, (product_id, product_name) in enumerate(unmatched_products, start=1):
-        hits = matcher.match(product_name)[:TOP_SUGGESTIONS]
-        for hit in hits:
-            suggested_id = barcode_to_id.get(str(hit["barcode"]))
-            if suggested_id is None:
-                continue
-
-            status = _triage_status(hit["confidence_score"])
-            counts[status] += 1
-            records.append(
-                {
-                    "unmatched_product_id": product_id,
-                    "suggested_product_id": suggested_id,
-                    "tfidf_score": hit["tfidf_score"],
-                    "embedding_score": hit["embedding_score"],
-                    "confidence_score": hit["confidence_score"],
-                    "confidence_label": hit["confidence_label"],
-                    "rank": hit["rank"],
-                    "status": status,
-                }
-            )
-
-        if index % 500 == 0 or index == total:
-            elapsed = time.perf_counter() - batch_start
-            rate = index / elapsed if elapsed else 0
-            print(f"  … {index:,}/{total:,} products ({rate:.1f}/s)")
+    records, counts = process_unmatched(matcher, unmatched_products, barcode_to_id)
 
     replace_matches(records)
     elapsed = time.perf_counter() - batch_start
@@ -400,6 +364,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     _configure_logging()
+
+    # Load optional overrides from .env (does not override pre-set env vars).
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
 
     print(BANNER)
     if args.rebuild:

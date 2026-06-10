@@ -8,6 +8,14 @@ from typing import Any
 import requests
 import streamlit as st
 
+try:
+    from dotenv import load_dotenv
+
+    # Honour a local .env for the Streamlit process (e.g. TRENDBOX_API_URL).
+    load_dotenv()
+except ImportError:
+    pass
+
 
 def get_api_url() -> str:
     """Resolve backend URL from env var, Streamlit secrets, or localhost default."""

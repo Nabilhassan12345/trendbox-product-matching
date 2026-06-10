@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 # Weighted blend of Stage 1 (TF-IDF) and Stage 2 (embedding) scores.
-TFIDF_WEIGHT = 0.3
-EMBEDDING_WEIGHT = 0.7
+#
+# Tuning note: evaluation on held-out same-barcode spelling variants
+# (scripts/evaluate.py) showed the multilingual embedding model assigns very
+# high similarity (0.92–0.98) to brand/size/flavour-swapped near-duplicates,
+# overriding the correct barcode. Character-level TF-IDF is the stronger signal
+# for *exact* product identity on this catalogue, so the blend favours it and
+# explicit brand/weight *mismatch* penalties demote near-duplicates.
+TFIDF_WEIGHT = 0.5
+EMBEDDING_WEIGHT = 0.5
 
 # Exact-match bonuses applied on top of the blended base score.
 BRAND_MATCH_BONUS = 0.05
 WEIGHT_MATCH_BONUS = 0.05
+
+# Mismatch penalties: a different brand or pack size almost always means a
+# different barcode, so penalise these much more strongly than the match bonus.
+BRAND_MISMATCH_PENALTY = 0.30
+WEIGHT_MISMATCH_PENALTY = 0.20
 
 # Confidence band thresholds (aligned with project auto-triage rules).
 HIGH_THRESHOLD = 0.90
@@ -23,22 +37,26 @@ COLOR_LOW = "#E74C3C"
 def compute_confidence(
     tfidf_score: float,
     embedding_score: float,
-    brand_match: bool,
-    weight_match: bool,
+    brand_match: Optional[bool],
+    weight_match: Optional[bool],
 ) -> float:
     """Compute an ensemble confidence score from retrieval and reranking signals.
 
-    The base score is a weighted blend favouring semantic embeddings (70%)
-    over character-level TF-IDF (30%).  Small bonuses reward exact brand and
-    weight agreement.
+    The base score is a weighted blend of character-level TF-IDF and semantic
+    embeddings.  Brand and weight agreement adjust the score: an exact match
+    adds a small bonus, an explicit mismatch subtracts a larger penalty (a
+    different brand or size almost always means a different barcode).
 
     Args:
         tfidf_score: Raw TF-IDF cosine score from Stage 1 (``tfidf_score``
             column, 0–1).  Do **not** pass ``tfidf_score_adjusted`` — brand and
-            weight bonuses are applied once here, not in Stage 1.
+            weight effects are applied once here, not in Stage 1.
         embedding_score: Cosine similarity from Stage 2 embeddings (0–1).
-        brand_match: ``True`` when query and candidate share the same brand token.
-        weight_match: ``True`` when query and candidate share the same weight/volume.
+        brand_match: ``True`` if query and candidate share the same brand,
+            ``False`` if they have *different* brands, ``None`` if either brand
+            is unknown (neutral).
+        weight_match: ``True`` / ``False`` / ``None`` for weight/volume, with the
+            same meaning as ``brand_match``.
 
     Returns:
         Final confidence in ``[0.0, 1.0]``.
@@ -49,10 +67,15 @@ def compute_confidence(
     embedding_clamped = max(0.0, min(1.0, embedding_score))
     base = (tfidf_clamped * TFIDF_WEIGHT) + (embedding_clamped * EMBEDDING_WEIGHT)
 
-    if brand_match:
+    if brand_match is True:
         base += BRAND_MATCH_BONUS
-    if weight_match:
+    elif brand_match is False:
+        base -= BRAND_MISMATCH_PENALTY
+
+    if weight_match is True:
         base += WEIGHT_MATCH_BONUS
+    elif weight_match is False:
+        base -= WEIGHT_MISMATCH_PENALTY
 
     return max(0.0, min(1.0, base))
 
@@ -114,20 +137,23 @@ if __name__ == "__main__":
     test_cases = [
         # (tfidf, embedding, brand, weight, description)
         (0.95, 0.92, True, True, "Strong match, brand+weight agree"),
-        (0.80, 0.85, True, False, "Good match, brand only"),
-        (0.70, 0.75, False, True, "Decent match, weight only"),
-        (0.50, 0.55, False, False, "Weak match, no bonuses"),
-        (0.30, 0.40, False, False, "Poor match"),
+        (0.80, 0.85, True, None, "Good match, brand agrees, weight unknown"),
+        (0.70, 0.75, None, True, "Decent match, weight agrees, brand unknown"),
+        (0.50, 0.55, None, None, "Weak match, no brand/weight info"),
+        (0.55, 0.98, False, True, "Brand SWAP: high embedding, wrong brand"),
+        (0.60, 0.95, True, False, "Size SWAP: same brand, wrong weight"),
         (1.10, 0.95, True, True, "TF-IDF >1 clamped to 1.0 in blend"),
-        (0.00, 0.00, False, False, "Zero scores"),
+        (0.00, 0.00, None, None, "Zero scores"),
         (0.90, 0.90, True, True, "Borderline HIGH"),
-        (0.60, 0.60, False, False, "Borderline MEDIUM"),
-        (0.59, 0.59, False, False, "Just below MEDIUM"),
+        (0.62, 0.62, None, None, "Borderline MEDIUM"),
     ]
 
     print(f"{'Description':<40} {'TF-IDF':>7} {'Embed':>7} {'Brand':>6} {'Wt':>4} "
           f"{'Score':>7} {'Label':>7} {'Triage':>14} {'Color':>10}")
     print("-" * 110)
+
+    def _flag(value: object) -> str:
+        return {True: "Y", False: "N", None: "-"}[value]  # type: ignore[index]
 
     for tfidf, embed, brand, weight, desc in test_cases:
         score = compute_confidence(tfidf, embed, brand, weight)
@@ -136,7 +162,7 @@ if __name__ == "__main__":
         color = get_confidence_color(score)
         print(
             f"{desc:<40} {tfidf:>7.2f} {embed:>7.2f} "
-            f"{'Y' if brand else 'N':>6} {'Y' if weight else 'N':>4} "
+            f"{_flag(brand):>6} {_flag(weight):>4} "
             f"{score:>7.4f} {label:>7} {action:>14} {color:>10}"
         )
 

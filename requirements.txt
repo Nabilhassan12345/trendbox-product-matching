@@ -1,15 +1,28 @@
-pandas>=2.0
-scikit-learn>=1.3
-sentence-transformers>=2.2
-faiss-cpu>=1.7
-streamlit>=1.33
-altair>=5.0
-fastapi>=0.100
-uvicorn>=0.23
-sqlalchemy>=2.0
-pydantic>=2.0
-joblib>=1.3
-numpy>=1.24
-requests>=2.31
-python-dotenv>=1.0
-matplotlib>=3.7
+# Pinned to the versions this project was built and tested against.
+# Requires Python 3.10+ (uses PEP 604 unions and the | type syntax).
+
+# Data + classic ML (Stage 1)
+pandas==3.0.3
+scikit-learn==1.9.0
+numpy==2.4.6
+joblib==1.5.3
+
+# Embeddings + vector search (Stage 2)
+sentence-transformers==5.5.1
+torch==2.12.0
+faiss-cpu==1.14.2
+
+# API
+fastapi==0.136.3
+uvicorn==0.49.0
+sqlalchemy==2.0.50
+pydantic==2.13.4
+
+# UI
+streamlit==1.58.0
+altair==6.2.1
+
+# Shared / utilities
+requests==2.34.2
+python-dotenv==1.2.2
+matplotlib==3.10.9

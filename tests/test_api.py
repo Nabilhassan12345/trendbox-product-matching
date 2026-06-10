@@ -31,42 +31,51 @@ def check(name: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
-def _make_mock_hits() -> list[dict]:
-    """Return three suggestions spanning all triage bands."""
-    bands = [
-        (0.95, 0.95, "8681558240180", "Ref Product A"),
-        (0.75, 0.75, "8681558240181", "Ref Product B"),
-        (0.40, 0.40, "8681558240182", "Ref Product C"),
-    ]
-    hits = []
-    for rank, (tfidf, embed, barcode, name) in enumerate(bands, start=1):
-        from src.confidence import compute_confidence, get_confidence_color, get_confidence_label, triage
+def _make_hit(rank: int, barcode: str, name: str, confidence: float) -> dict:
+    """Build a single match-result dict with consistent confidence metadata."""
+    from src.confidence import get_confidence_color, get_confidence_label, triage
 
-        confidence = compute_confidence(tfidf, embed, brand_match=False, weight_match=False)
-        hits.append(
-            {
-                "rank": rank,
-                "barcode": barcode,
-                "name": name,
-                "tfidf_score": tfidf,
-                "embedding_score": embed,
-                "confidence_score": round(confidence, 4),
-                "confidence_label": get_confidence_label(confidence),
-                "confidence_color": get_confidence_color(confidence),
-                "explanation": f"Mock explanation for {name}",
-                "triage": triage(confidence),
-            }
-        )
-    return hits
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "rank": rank,
+        "barcode": barcode,
+        "name": name,
+        "tfidf_score": round(confidence, 4),
+        "embedding_score": round(confidence, 4),
+        "confidence_score": round(confidence, 4),
+        "confidence_label": get_confidence_label(confidence),
+        "confidence_color": get_confidence_color(confidence),
+        "explanation": f"Mock explanation for {name}",
+        "triage": triage(confidence),
+    }
+
+
+def _hits_for_band(primary_confidence: float) -> list[dict]:
+    """Three ranked suggestions; rank-1 confidence decides the product band."""
+    return [
+        _make_hit(1, "8681558240180", "Ref Product A", primary_confidence),
+        _make_hit(2, "8681558240181", "Ref Product B", primary_confidence - 0.2),
+        _make_hit(3, "8681558240182", "Ref Product C", primary_confidence - 0.4),
+    ]
+
+
+def _make_mock_hits() -> list[dict]:
+    """Return three suggestions spanning all triage bands (rank-1 = HIGH)."""
+    return _hits_for_band(0.95)
 
 
 class FakeMatcher:
-    """Lightweight stand-in for ProductMatcher in API tests."""
+    """Stand-in for ProductMatcher; rank-1 confidence varies by product name."""
 
     _built = True
 
     def match(self, product_name: str) -> list[dict]:
-        return _make_mock_hits()
+        name = product_name.lower()
+        if "reject" in name:
+            return _hits_for_band(0.40)
+        if "review" in name:
+            return _hits_for_band(0.75)
+        return _hits_for_band(0.95)
 
 
 def _seed_products(db_path: str) -> None:
@@ -84,13 +93,14 @@ def _seed_products(db_path: str) -> None:
             "weight": ["100 g", "100 g", "100 g", "100 g"],
         }
     )
+    # Three distinct products so per-product triage exercises all three bands.
     df_unmatched = pd.DataFrame(
         {
-            "barcode": ["", ""],
-            "name": ["Ulker Test Product", "Ulker Test Product"],
-            "name_clean": ["ulker test product", "ulker test product"],
-            "brand": ["ulker", "ulker"],
-            "weight": ["150 g", "150 g"],
+            "barcode": ["", "", ""],
+            "name": ["Approve Product", "Review Product", "Reject Product"],
+            "name_clean": ["approve product", "review product", "reject product"],
+            "brand": ["approve", "review", "reject"],
+            "weight": ["150 g", "150 g", "150 g"],
         }
     )
     load_products(df_barcoded, df_unmatched)
@@ -249,9 +259,14 @@ def test_api_endpoints(client: TestClient) -> int | None:
             f"auto_rejected={batch.auto_rejected}",
         )
         check(
-            "POST /batch_process total equals triage sum",
-            batch.total_suggestions
+            "POST /batch_process total_products equals band sum",
+            batch.total_products
             == batch.auto_approved + batch.pending + batch.auto_rejected,
+        )
+        check(
+            "POST /batch_process persists alternatives (rows >= products)",
+            batch.total_suggestions >= batch.total_products,
+            f"rows={batch.total_suggestions}, products={batch.total_products}",
         )
 
     response = client.get("/stats")
@@ -280,6 +295,15 @@ def test_api_endpoints(client: TestClient) -> int | None:
         if response.status_code == 200:
             decision = DecisionResponse.model_validate(response.json())
             check("POST /decision schema valid", decision.success is True)
+
+        # Deciding one product resolves it entirely (siblings superseded), so the
+        # single pending product should leave the queue.
+        response = client.get("/match/next")
+        check(
+            "GET /match/next 404 after the only pending product is resolved",
+            response.status_code == 404,
+            response.text,
+        )
 
     response = client.post(
         "/decision/999999",

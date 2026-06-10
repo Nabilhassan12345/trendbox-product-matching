@@ -105,6 +105,9 @@ class TFIDFRetriever:
         results = self.reference_df.iloc[ranked_indices][
             ["barcode", "name", "name_clean"]
         ].copy()
+        # Position of each candidate in the reference catalogue. Lets Stage 2
+        # reuse its cached embedding matrix instead of re-encoding candidates.
+        results["ref_index"] = np.asarray(ranked_indices)
         results["tfidf_score"] = base_scores[order]
         results["tfidf_score_adjusted"] = adjusted_scores[order]
         return results.reset_index(drop=True)
@@ -118,6 +121,7 @@ class TFIDFRetriever:
 
         Returns:
             DataFrame with columns ``barcode``, ``name``, ``name_clean``,
+            ``ref_index`` (position in the reference catalogue),
             ``tfidf_score`` (cosine similarity in [0, 1]),
             ``tfidf_score_adjusted`` (with bonuses; may exceed 1.0),
             sorted by adjusted score descending.

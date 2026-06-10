@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 TOP_K_TFIDF = 50
 TOP_K_RERANK = 3
 
+def _match_state(query_value: str, candidate_value: str) -> Optional[bool]:
+    """Tri-state agreement: True (equal), False (differ), or None (unknown).
+
+    Returns ``None`` when either side is missing so the confidence score stays
+    neutral rather than penalising for absent metadata.
+    """
+    if not query_value or not candidate_value:
+        return None
+    return query_value == candidate_value
+
+
 MATCH_RESULT_KEYS = frozenset(
     {
         "rank",
@@ -93,16 +104,22 @@ class ProductMatcher:
         Pipeline:
         1. Normalise the query with :func:`preprocess.normalize`
         2. TF-IDF retrieval (top 50 candidates)
-        3. Embedding rerank (top 5)
-        4. Ensemble confidence scoring per candidate
+        3. Embedding rerank to add a semantic score to every candidate
+        4. Score every candidate with the penalised ensemble confidence and
+           return the top 3 by confidence
+
+        Ranking by the ensemble (rather than by raw embedding similarity) lets
+        brand/weight mismatch penalties demote near-duplicates — e.g. a
+        same-product-different-brand or different-size item — that the embedding
+        model otherwise scores very highly.
 
         Args:
             product_name: Raw or partially cleaned product name.
 
         Returns:
-            List of up to five result dicts, each containing ``rank``,
+            List of up to three result dicts, each containing ``rank``,
             ``barcode``, ``name``, scores, confidence metadata, ``explanation``,
-            and ``triage`` action.
+            and ``triage`` action, ordered by confidence descending.
         """
         self._require_built()
 
@@ -115,13 +132,16 @@ class ProductMatcher:
         if candidates.empty:
             return []
 
-        reranked = self.embedder.rerank(query, candidates).head(TOP_K_RERANK)
+        scored = self.embedder.rerank(query, candidates)
 
-        results: List[Dict[str, Any]] = []
-        for rank, row in enumerate(reranked.itertuples(index=False), start=1):
+        query_brand = extract_brand(query)
+        query_weight = extract_weight(query)
+
+        ranked: List[Dict[str, Any]] = []
+        for row in scored.itertuples(index=False):
             candidate_clean = row.name_clean if hasattr(row, "name_clean") else normalize(row.name)
-            brand_match = bool(extract_brand(query)) and extract_brand(query) == extract_brand(candidate_clean)
-            weight_match = bool(extract_weight(query)) and extract_weight(query) == extract_weight(candidate_clean)
+            brand_match = _match_state(query_brand, extract_brand(candidate_clean))
+            weight_match = _match_state(query_weight, extract_weight(candidate_clean))
 
             tfidf_score = float(row.tfidf_score)
             embedding_score = float(row.embedding_score)
@@ -131,14 +151,32 @@ class ProductMatcher:
                 brand_match=brand_match,
                 weight_match=weight_match,
             )
-            explanation = self.embedder.explain_match(query, candidate_clean)["explanation"]
+            ranked.append(
+                {
+                    "barcode": str(row.barcode) if row.barcode is not None else "",
+                    "name": str(row.name),
+                    "name_clean": candidate_clean,
+                    "tfidf_score": tfidf_score,
+                    "embedding_score": embedding_score,
+                    "confidence_score": confidence_score,
+                }
+            )
+
+        ranked.sort(key=lambda item: item["confidence_score"], reverse=True)
+
+        results: List[Dict[str, Any]] = []
+        for rank, item in enumerate(ranked[:TOP_K_RERANK], start=1):
+            confidence_score = item["confidence_score"]
+            explanation = self.embedder.build_explanation(
+                query, item["name_clean"], item["embedding_score"]
+            )["explanation"]
 
             hit = {
                 "rank": rank,
-                "barcode": str(row.barcode) if row.barcode is not None else "",
-                "name": str(row.name),
-                "tfidf_score": round(tfidf_score, 4),
-                "embedding_score": round(embedding_score, 4),
+                "barcode": item["barcode"],
+                "name": item["name"],
+                "tfidf_score": round(item["tfidf_score"], 4),
+                "embedding_score": round(item["embedding_score"], 4),
                 "confidence_score": round(confidence_score, 4),
                 "confidence_label": get_confidence_label(confidence_score),
                 "confidence_color": get_confidence_color(confidence_score),

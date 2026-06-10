@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
+# ── Match status vocabulary ───────────────────────────────────────────────────
+# Triage is decided per *product* from its rank-1 (best) candidate:
+#   - the primary (rank-1) row carries the product-level outcome
+#   - lower-ranked rows are stored as ALTERNATIVE (shown in review) or
+#     SUPERSEDED (the product was already resolved, so they are never queued)
+STATUS_PENDING = "pending"
+STATUS_AUTO_APPROVED = "auto_approved"
+STATUS_AUTO_REJECTED = "auto_rejected"
+STATUS_ALTERNATIVE = "alternative"
+STATUS_SUPERSEDED = "superseded"
+STATUS_APPROVED = "approved"
+STATUS_REJECTED = "rejected"
+
+# Statuses that still represent an open suggestion the operator can act on.
+OPEN_STATUSES = (STATUS_PENDING, STATUS_ALTERNATIVE)
+
 _engine = None
 _SessionLocal: Optional[sessionmaker] = None
 
@@ -424,15 +440,33 @@ def save_decision(match_id: int, decision: str, note: str = "") -> Dict[str, Any
         if match is None:
             raise ValueError(f"Match id={match_id} not found")
 
-        match.status = decision
+        match.status = STATUS_APPROVED if decision == "approved" else STATUS_REJECTED
         record = Decision(
             match_id=match_id,
             decision=decision,
             operator_note=note or None,
         )
         session.add(record)
+
+        # Resolve the whole product: close any sibling suggestions still open so
+        # the product cannot reappear in the review queue.
+        superseded = (
+            session.query(Match)
+            .filter(
+                Match.unmatched_product_id == match.unmatched_product_id,
+                Match.id != match_id,
+                Match.status.in_(OPEN_STATUSES),
+            )
+            .update({Match.status: STATUS_SUPERSEDED}, synchronize_session=False)
+        )
+
         session.flush()
-        logger.info("Match %s marked %s", match_id, decision)
+        logger.info(
+            "Match %s marked %s (%s sibling suggestion(s) superseded)",
+            match_id,
+            decision,
+            superseded,
+        )
         return record.to_dict()
 
 

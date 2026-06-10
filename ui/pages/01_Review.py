@@ -242,24 +242,12 @@ with btn_col1:
 
 with btn_col2:
     if st.button("❌ REJECT ALL", use_container_width=True, key="reject_all"):
-        pending_ids = [s["match_id"] for s in current.get("suggestions", []) if s.get("match_id")]
-        if not pending_ids:
-            st.error("Nothing to reject.")
+        # Rejecting the primary suggestion resolves the whole product: the
+        # backend supersedes the remaining alternatives in the same transaction.
+        if top_match and top_match.get("match_id"):
+            _handle_decision(top_match["match_id"], "rejected", "All suggestions rejected")
         else:
-            results = [
-                _submit_decision(match_id, "rejected", _operator_note(), count_session=False)[0]
-                for match_id in pending_ids
-            ]
-            if all(results):
-                st.session_state.rejected_today += 1
-                st.session_state.reviewed_count += 1
-                st.session_state.last_toast = "All suggestions rejected"
-                st.session_state.auto_advance = True
-                st.rerun()
-            elif any(results):
-                st.warning("Some suggestions could not be rejected.")
-            else:
-                show_offline()
+            st.error("Nothing to reject.")
 
 st.text_input(
     "Operator note (optional)",

@@ -19,7 +19,7 @@ RAW DATA → PREPROCESSING → [BARCODED: FAISS INDEX] + [UNMATCHED: EMBEDDING M
 | **Barcoded: FAISS index** | `src/embedding_reranker.py` | Pre-computed multilingual embeddings for 58,434 reference products, indexed for fast vector search |
 | **Unmatched: embedding model** | `paraphrase-multilingual-MiniLM-L12-v2` | Encodes each query product at match time for semantic comparison |
 | **Two-stage pipeline** | `src/tfidf_retriever.py` + `src/matcher.py` | Stage 1: TF-IDF retrieves top 50 candidates; Stage 2: embeddings rerank to top 3 |
-| **Confidence scoring** | `src/confidence.py` | Blends TF-IDF (30%) + embedding (70%) scores with brand/weight bonuses |
+| **Confidence scoring** | `src/confidence.py` | Blends TF-IDF (50%) + embedding (50%) scores with brand/weight bonuses and mismatch penalties |
 | **Auto-approve / review / reject** | `src/database.py`, `api/main.py` | Routes matches by confidence: >0.90 auto-approve, 0.60–0.90 pending review, <0.60 auto-reject |
 | **Operator UI** | `ui/` (Streamlit) | Review queue, analytics dashboard, approve/reject workflow |
 | **Feedback loop** | `POST /decision/{id}` | Operator decisions persist to SQLite and feed analytics for quality monitoring |
@@ -44,13 +44,21 @@ RAW DATA → PREPROCESSING → [BARCODED: FAISS INDEX] + [UNMATCHED: EMBEDDING M
 
 ## Installation
 
+Requires **Python 3.10+**.
+
 ```bash
 git clone https://github.com/Nabilhassan12345/trendbox-product-matching.git && cd trendbox-product-matching
 pip install -r requirements.txt
 python pipeline.py
 ```
 
-The pipeline loads data, builds or restores cached indexes, runs batch matching (~70 minutes on first run), starts the API on **http://localhost:8000**, and opens the UI on **http://localhost:8501**.
+The pipeline loads data, builds or restores cached indexes, runs batch matching, starts the API on **http://localhost:8000**, and opens the UI on **http://localhost:8501**.
+
+Configuration is optional — every variable has a sensible default. To override (e.g. for deployment), copy the template and edit it:
+
+```bash
+cp .env.example .env
+```
 
 To skip batch matching when results already exist in the database:
 
@@ -74,10 +82,13 @@ The query and top-50 candidates are encoded with `paraphrase-multilingual-MiniLM
 
 ### 2. Confidence Scoring
 
-Each candidate receives an ensemble confidence score:
+Each candidate receives an ensemble confidence score, which also ranks the
+candidates (so brand/size mismatches are demoted, not just flagged):
 
 ```
-confidence = (0.30 × TF-IDF) + (0.70 × embedding) + brand_bonus + weight_bonus
+confidence = (0.50 × TF-IDF) + (0.50 × embedding)
+             + brand/weight match bonus (+0.05 each)
+             − brand/weight mismatch penalty (−0.30 brand, −0.20 weight)
 ```
 
 | Band | Threshold | Action |
@@ -86,7 +97,11 @@ confidence = (0.30 × TF-IDF) + (0.70 × embedding) + brand_bonus + weight_bonus
 | Medium | 0.60 – 0.90 | Pending — sent to operator review queue |
 | Low | < 0.60 | Auto-rejected — not shown as a viable match |
 
-Brand and weight exact-match bonuses (+0.05 each) reward structurally consistent pairs beyond raw text similarity.
+The weighting and penalties are evidence-based: evaluation (`scripts/evaluate.py`)
+showed the embedding model assigns very high similarity to brand/size/flavour-
+swapped near-duplicates, so the blend gives TF-IDF equal weight and penalises
+explicit brand/weight mismatches — a different brand or pack size almost always
+means a different barcode.
 
 ### 3. Human-in-the-Loop Review
 
@@ -99,7 +114,8 @@ Medium-confidence matches land in the Streamlit **Review** page. Operators see t
 ```
 trendbox-product-matching/
 ├── pipeline.py                  # Single entry point: load → index → batch → API → UI
-├── requirements.txt             # Python dependencies
+├── requirements.txt             # Pinned Python dependencies
+├── .env.example                 # Template for optional environment configuration
 ├── README.md                    # This file
 │
 ├── data/
@@ -128,8 +144,7 @@ trendbox-product-matching/
 │   ├── _bootstrap.py            # Adds project root to sys.path for Streamlit imports
 │   └── pages/
 │       ├── 01_Review.py         # Operator review queue (approve / reject)
-│       ├── 02_Analytics.py      # Dashboard: match rates, charts, recent decisions
-│       └── 2_Stats.py           # Lightweight stats page (legacy companion to Analytics)
+│       └── 02_Analytics.py      # Dashboard: match rates, charts, recent decisions
 │
 ├── notebooks/
 │   ├── 01_exploration.ipynb     # EDA: data quality, Turkish text patterns, architecture rationale
@@ -139,7 +154,9 @@ trendbox-product-matching/
 │   ├── run_all_tests.py         # Full verification: files, imports, data load, API tests
 │   └── test_api.py              # 30 integration checks for every FastAPI endpoint
 │
-├── scripts/                     # Reserved for utility scripts
+├── scripts/
+│   ├── evaluate.py              # Held-out recall@k + confidence threshold sweep
+│   └── run_batch.py             # Run batch matching only (no API/UI)
 └── .streamlit/
     └── config.toml              # Streamlit theme and server settings
 ```
@@ -152,13 +169,34 @@ trendbox-product-matching/
 python tests/run_all_tests.py
 ```
 
-This runs four verification suites: required file checks, module import smoke tests, CSV load validation (100,585 rows), and 30 API integration tests. All must pass before submission.
+This runs six verification suites: required-file checks, module import smoke tests, CSV load validation (100,585 rows), preprocessing unit tests, matcher end-to-end tests, and API integration tests. All must pass before submission.
 
-To run API tests only:
+To run a single suite:
 
 ```bash
-python tests/test_api.py
+python tests/test_preprocess.py   # fast, no model required
+python tests/test_matcher.py      # builds a small matcher (needs the embedding model)
+python tests/test_api.py          # FastAPI endpoint integration tests
 ```
+
+---
+
+## Evaluation
+
+Accuracy is measured against ground truth mined from the catalogue itself:
+products that share a barcode but are spelled differently are, by definition, the
+same product. Each run holds one spelling out of the reference index and checks
+whether the pipeline recovers the correct barcode.
+
+```bash
+python scripts/evaluate.py --max-queries 1000 --target-precision 0.95
+```
+
+It reports **Recall@1 / Recall@3** for TF-IDF only, embeddings only, and the
+two-stage pipeline, plus a **precision-vs-coverage sweep** over the rank-1
+confidence score — the evidence used to set the auto-approve / auto-reject
+thresholds. The reference index reuses cached embeddings, so a run takes about a
+minute on CPU after the one-time model load.
 
 ---
 
