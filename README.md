@@ -215,3 +215,9 @@ minute on CPU after the one-time model load.
 | `TRENDBOX_DB_PATH` | `data/matching.db` | SQLite database path |
 | `TRENDBOX_MATCHER_INDEX` | `data/matcher_index` | Matcher index directory |
 | `TRENDBOX_API_URL` | `http://localhost:8000` | API base URL for Streamlit UI |
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
