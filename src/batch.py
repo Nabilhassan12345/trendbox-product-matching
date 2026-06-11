@@ -118,8 +118,13 @@ def process_unmatched(
     total = len(unmatched_products)
     start = time.perf_counter()
 
-    for index, (product_id, product_name) in enumerate(unmatched_products, start=1):
-        hits = matcher.match(product_name)
+    # Batched matching: encode all queries in chunks (one transformer pass per
+    # chunk) instead of one forward pass per product. Orders of magnitude faster
+    # on CPU than calling matcher.match() in a loop.
+    names = [product_name for _, product_name in unmatched_products]
+    per_product_hits = matcher.match_many(names)
+
+    for (product_id, _), hits in zip(unmatched_products, per_product_hits):
         product_records, status = build_records_for_product(
             hits, product_id, barcode_to_id
         )
@@ -131,9 +136,10 @@ def process_unmatched(
         elif status == STATUS_AUTO_REJECTED:
             counts["auto_rejected"] += 1
 
-        if progress_every and (index % progress_every == 0 or index == total):
-            elapsed = time.perf_counter() - start
-            rate = index / elapsed if elapsed else 0.0
-            logger.info("Matched %s/%s products (%.1f/s)", f"{index:,}", f"{total:,}", rate)
+    elapsed = time.perf_counter() - start
+    rate = total / elapsed if elapsed else 0.0
+    logger.info(
+        "Triaged %s products in %.1fs (%.1f/s)", f"{total:,}", elapsed, rate
+    )
 
     return records, counts

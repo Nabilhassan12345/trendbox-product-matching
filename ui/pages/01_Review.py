@@ -158,7 +158,7 @@ if current is None:
     if total_matches == 0:
         st.warning(
             "No match records in the database yet. Go to the **app** home page and "
-            "click **Run batch process** (~70 minutes for the full catalogue)."
+            "click **Run batch process** (a few minutes for the full catalogue)."
         )
     else:
         st.balloons()

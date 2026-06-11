@@ -41,7 +41,7 @@ col3.metric("Pending reviews", f"{health['pending_reviews']:,}")
 if health["pending_reviews"] == 0 and health["products_indexed"] > 0:
     st.warning(
         "No match records in the review queue. Run batch processing below "
-        "(~70 minutes for the full catalogue)."
+        "(a few minutes for the full catalogue)."
     )
 
 st.divider()
@@ -52,7 +52,7 @@ action_col1, action_col2 = st.columns(2)
 
 with action_col1:
     if st.button("Run batch process", type="primary", use_container_width=True):
-        with st.spinner("Matching all unmatched products — this can take ~70 minutes…"):
+        with st.spinner("Matching all unmatched products — this takes a few minutes…"):
             try:
                 response = requests.post(f"{get_api_url()}/batch_process", timeout=7200)
                 response.raise_for_status()

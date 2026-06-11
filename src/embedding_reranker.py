@@ -245,6 +245,26 @@ class EmbeddingReranker:
         reranked["embedding_score"] = scores
         return reranked.sort_values("embedding_score", ascending=False).reset_index(drop=True)
 
+    def candidate_scores(self, query_vec: np.ndarray, candidates: pd.DataFrame) -> np.ndarray:
+        """Cosine similarity between a query vector and each candidate.
+
+        The query vector must already be unit-normalised (as returned by
+        :meth:`encode`). Candidate vectors are looked up from the cached
+        reference embeddings via ``ref_index`` when available, so no re-encoding
+        happens on the hot path. Scores are returned in candidate row order.
+
+        Args:
+            query_vec: Unit-normalised query embedding of shape ``(dim,)``.
+            candidates: Stage-1 candidate DataFrame (ideally with ``ref_index``).
+
+        Returns:
+            Float array of cosine scores in ``[-1, 1]``, one per candidate row.
+        """
+        if candidates.empty:
+            return np.empty((0,), dtype=np.float32)
+        candidate_vecs = self._candidate_vectors(candidates)
+        return np.clip(candidate_vecs @ np.asarray(query_vec, dtype=np.float32), -1.0, 1.0)
+
     def search_faiss(self, query: str, top_k: int = 5) -> pd.DataFrame:
         """Search the full reference index directly via FAISS.
 

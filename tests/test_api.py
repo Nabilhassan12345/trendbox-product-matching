@@ -77,6 +77,9 @@ class FakeMatcher:
             return _hits_for_band(0.75)
         return _hits_for_band(0.95)
 
+    def match_many(self, product_names: list[str]) -> list[list[dict]]:
+        return [self.match(name) for name in product_names]
+
 
 def _seed_products(db_path: str) -> None:
     """Load a minimal barcoded + unmatched catalogue into the test database."""

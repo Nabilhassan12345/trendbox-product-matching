@@ -132,19 +132,41 @@ class ProductMatcher:
         if candidates.empty:
             return []
 
-        scored = self.embedder.rerank(query, candidates)
+        query_vec = self.embedder.encode([query], show_progress_bar=False)[0]
+        embedding_scores = self.embedder.candidate_scores(query_vec, candidates)
+        return self._assemble_hits(query, candidates, embedding_scores)
 
+    def _assemble_hits(
+        self,
+        query: str,
+        candidates: pd.DataFrame,
+        embedding_scores: Any,
+    ) -> List[Dict[str, Any]]:
+        """Score candidates with the penalised ensemble and return the top 3.
+
+        Shared by :meth:`match` (single query) and :meth:`match_many` (batched)
+        so both paths produce byte-for-byte identical results.
+
+        Args:
+            query: Normalised query name.
+            candidates: Stage-1 candidate DataFrame for this query.
+            embedding_scores: Embedding cosine scores aligned to ``candidates``
+                row order (from :meth:`EmbeddingReranker.candidate_scores`).
+
+        Returns:
+            Up to three result dicts ordered by confidence descending.
+        """
         query_brand = extract_brand(query)
         query_weight = extract_weight(query)
 
         ranked: List[Dict[str, Any]] = []
-        for row in scored.itertuples(index=False):
+        for position, row in enumerate(candidates.itertuples(index=False)):
             candidate_clean = row.name_clean if hasattr(row, "name_clean") else normalize(row.name)
             brand_match = _match_state(query_brand, extract_brand(candidate_clean))
             weight_match = _match_state(query_weight, extract_weight(candidate_clean))
 
             tfidf_score = float(row.tfidf_score)
-            embedding_score = float(row.embedding_score)
+            embedding_score = float(embedding_scores[position])
             confidence_score = compute_confidence(
                 tfidf_score=tfidf_score,
                 embedding_score=embedding_score,
@@ -162,7 +184,12 @@ class ProductMatcher:
                 }
             )
 
-        ranked.sort(key=lambda item: item["confidence_score"], reverse=True)
+        # Deterministic ordering: confidence first, then embedding, then barcode
+        # as a stable tiebreaker so results never depend on upstream candidate
+        # order (single search() vs batched batch_search() return top-k unsorted).
+        ranked.sort(
+            key=lambda item: (-item["confidence_score"], -item["embedding_score"], item["barcode"])
+        )
 
         results: List[Dict[str, Any]] = []
         for rank, item in enumerate(ranked[:TOP_K_RERANK], start=1):
@@ -189,10 +216,69 @@ class ProductMatcher:
 
         return results
 
-    def batch_match(self, df_unmatched: pd.DataFrame) -> pd.DataFrame:
-        """Run :meth:`match` on every row in an unmatched products DataFrame.
+    def match_many(
+        self,
+        product_names: List[str],
+        chunk_size: int = 512,
+    ) -> List[List[Dict[str, Any]]]:
+        """Match many product names with batched embedding encoding.
 
-        Logs progress every 1,000 products.
+        This is the fast path for whole-catalogue runs. Instead of encoding one
+        query at a time (a transformer forward pass per product), queries are
+        processed in chunks: each chunk's queries are encoded in a single batched
+        call and retrieved with one batched TF-IDF multiply. Reranking then reuses
+        the cached reference embeddings. Results are identical to calling
+        :meth:`match` per product, but far faster on CPU.
+
+        Args:
+            product_names: Raw product names to match.
+            chunk_size: Number of queries encoded/retrieved together. Larger
+                chunks improve throughput but use more transient memory.
+
+        Returns:
+            List aligned to ``product_names`` where each element is that
+            product's ranked hit list (empty if the query was blank or had no
+            candidates).
+        """
+        self._require_built()
+
+        total = len(product_names)
+        queries = [normalize(name) for name in product_names]
+        results: List[List[Dict[str, Any]]] = [[] for _ in range(total)]
+
+        start = time.perf_counter()
+        for chunk_start in range(0, total, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total)
+            chunk = [
+                (idx, queries[idx])
+                for idx in range(chunk_start, chunk_end)
+                if queries[idx]
+            ]
+            if not chunk:
+                continue
+
+            chunk_queries = [query for _, query in chunk]
+            query_vecs = self.embedder.encode(chunk_queries, show_progress_bar=False)
+            tfidf_results = self.tfidf.batch_search(chunk_queries, top_k=TOP_K_TFIDF)
+
+            for (global_idx, query), query_vec in zip(chunk, query_vecs):
+                candidates = tfidf_results[query]
+                if candidates.empty:
+                    continue
+                embedding_scores = self.embedder.candidate_scores(query_vec, candidates)
+                results[global_idx] = self._assemble_hits(query, candidates, embedding_scores)
+
+            logger.info("Matched %s/%s products", f"{chunk_end:,}", f"{total:,}")
+
+        elapsed = time.perf_counter() - start
+        logger.info("match_many complete: %s products in %.2fs", f"{total:,}", elapsed)
+        return results
+
+    def batch_match(self, df_unmatched: pd.DataFrame) -> pd.DataFrame:
+        """Match every row in an unmatched products DataFrame (batched).
+
+        Delegates to :meth:`match_many`, which encodes queries in chunks for
+        speed, then flattens the per-product hits into a long-format frame.
 
         Args:
             df_unmatched: DataFrame with at least a ``name`` column.
@@ -206,17 +292,14 @@ class ProductMatcher:
         if "name" not in df_unmatched.columns:
             raise ValueError("df_unmatched must contain a 'name' column")
 
-        total = len(df_unmatched)
-        logger.info("Batch matching %s unmatched products", f"{total:,}")
+        names = df_unmatched["name"].tolist()
+        logger.info("Batch matching %s unmatched products", f"{len(names):,}")
+
+        per_product_hits = self.match_many(names)
 
         rows: List[Dict[str, Any]] = []
-        batch_start = time.perf_counter()
-
-        for index, product in enumerate(df_unmatched.itertuples(index=False), start=1):
-            raw_name = product.name
+        for raw_name, matches in zip(names, per_product_hits):
             query_clean = normalize(raw_name)
-            matches = self.match(raw_name)
-
             for match in matches:
                 rows.append(
                     {
@@ -226,15 +309,10 @@ class ProductMatcher:
                     }
                 )
 
-            if index % 1_000 == 0:
-                logger.info("Matched %s / %s products", f"{index:,}", f"{total:,}")
-
-        elapsed = time.perf_counter() - batch_start
         logger.info(
-            "Batch match complete: %s products, %s suggestions in %.2fs",
-            f"{total:,}",
+            "Batch match complete: %s products, %s suggestions",
+            f"{len(names):,}",
             f"{len(rows):,}",
-            elapsed,
         )
         return pd.DataFrame(rows)
 
