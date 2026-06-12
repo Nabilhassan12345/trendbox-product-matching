@@ -27,6 +27,9 @@ REQUIRED_FILES = (
     "tests/test_preprocess.py",
     "tests/test_matcher.py",
     "tests/test_api.py",
+    "tests/test_match_metadata.py",
+    "tests/test_blocking.py",
+    "tests/test_product_kind.py",
     "data/mix_products.csv",
     "requirements.txt",
 )
@@ -116,6 +119,9 @@ def main() -> int:
         check_imports(),
         check_data_load(),
         _run_test_file("test_preprocess.py", "Preprocessing unit tests"),
+        _run_test_file("test_match_metadata.py", "Match metadata unit tests"),
+        _run_test_file("test_blocking.py", "Stage 0 blocking tests"),
+        _run_test_file("test_product_kind.py", "Product kind tests"),
         _run_test_file("test_matcher.py", "Matcher end-to-end tests"),
         _run_test_file("test_api.py", "API integration tests"),
     ]

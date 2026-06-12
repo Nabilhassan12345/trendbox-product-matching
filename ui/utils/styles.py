@@ -352,6 +352,21 @@ header    { visibility: hidden; }
 }
 .tag-brand  { background: #DBEAFE; color: #1E40AF; }
 .tag-weight { background: #F3F4F6; color: #374151; }
+.tag-kind-fresh   { background: #D1FAE5; color: #065F46; }
+.tag-kind-branded { background: #EDE9FE; color: #5B21B6; }
+.tag-kind-unknown { background: #F3F4F6; color: #6B7280; }
+.source-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.source-stage0 { background: #ECFDF5; color: #047857; }
+.source-ml     { background: #EFF6FF; color: #1D4ED8; }
 
 /* ── Animations ── */
 @keyframes name-flash {
@@ -850,6 +865,37 @@ def tags_html(brand: str | None, weight: str | None) -> str:
     return "".join(parts)
 
 
+def product_kind_pill_html(product_kind: str | None) -> str:
+    """Return a product-kind pill for the review product card."""
+    kind = (product_kind or "unknown").lower()
+    labels = {
+        "fresh": "Fresh produce",
+        "branded": "Branded FMCG",
+        "unknown": "Unknown kind",
+    }
+    css = {
+        "fresh": "tag-kind-fresh",
+        "branded": "tag-kind-branded",
+        "unknown": "tag-kind-unknown",
+    }
+    label = labels.get(kind, labels["unknown"])
+    cls = css.get(kind, css["unknown"])
+    return f'<span class="tag {cls}" style="font-size:13px; padding:4px 12px;">{label}</span>'
+
+
+def match_source_chip_html(match_source: str | None) -> str:
+    """Return a resolution-method chip for a suggestion card."""
+    source = (match_source or "ml").lower()
+    labels = {
+        "stage0_exact": "Stage 0 · Exact",
+        "stage0_fuzzy": "Stage 0 · Fuzzy",
+        "ml": "ML match",
+    }
+    label = labels.get(source, labels["ml"])
+    cls = "source-stage0" if source.startswith("stage0") else "source-ml"
+    return f'<span class="source-chip {cls}">{label}</span>'
+
+
 def progress_bar_html(
     value: float,
     height: int = 4,
@@ -1066,8 +1112,8 @@ def render_page_nav(active: str, *, alive: bool = False) -> None:
         inject_alive_interactions()
     st.markdown(PAGE_NAV_CSS, unsafe_allow_html=True)
 
-    logo_col, home_col, review_col, analytics_col, _ = st.columns(
-        [0.45, 1, 1, 1, 2.5], gap="small"
+    logo_col, home_col, review_col, analytics_col, pipeline_col, _ = st.columns(
+        [0.45, 1, 1, 1, 1, 2], gap="small"
     )
 
     with logo_col:
@@ -1080,6 +1126,7 @@ def render_page_nav(active: str, *, alive: bool = False) -> None:
         (home_col, "home", "app.py", "Home"),
         (review_col, "review", "pages/01_Review.py", "Review"),
         (analytics_col, "analytics", "pages/02_Analytics.py", "Analytics"),
+        (pipeline_col, "pipeline", "pages/03_Pipeline.py", "Pipeline"),
     )
     for col, key, path, label in nav_items:
         with col:

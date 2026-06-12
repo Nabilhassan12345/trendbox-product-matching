@@ -61,9 +61,21 @@ def api_get(
 
 def api_post(path: str, json: dict | None = None, timeout: int = 30) -> tuple[bool, bool]:
     """POST to the API. Returns (success, api_offline)."""
+    data, offline = api_post_json(path, json=json, timeout=timeout)
+    return data is not None, offline
+
+
+def api_post_json(
+    path: str,
+    json: dict | None = None,
+    timeout: int = 30,
+) -> tuple[Any | None, bool]:
+    """POST to the API and parse JSON. Returns (data, api_offline)."""
     try:
         response = requests.post(f"{get_api_url()}{path}", json=json, timeout=timeout)
         response.raise_for_status()
-        return True, False
+        if not response.content:
+            return {}, False
+        return response.json(), False
     except requests.RequestException as exc:
-        return False, is_connection_error(exc)
+        return None, is_connection_error(exc)

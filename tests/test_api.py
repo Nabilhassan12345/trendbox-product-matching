@@ -64,10 +64,25 @@ def _make_mock_hits() -> list[dict]:
     return _hits_for_band(0.95)
 
 
+class _FakeTfidfIndex:
+    """Minimal TF-IDF stub so batch_process can build Stage0Resolver."""
+
+    def __init__(self) -> None:
+        self.reference_df = pd.DataFrame(
+            {
+                "barcode": ["8681558240180", "8681558240181", "8681558240182"],
+                "name": ["Ref Product A", "Ref Product B", "Ref Product C"],
+                "name_clean": ["ref product a", "ref product b", "ref product c"],
+            }
+        )
+
+
 class FakeMatcher:
     """Stand-in for ProductMatcher; rank-1 confidence varies by product name."""
 
     _built = True
+    tfidf = _FakeTfidfIndex()
+    embedder = None
 
     def match(self, product_name: str) -> list[dict]:
         name = product_name.lower()
@@ -77,7 +92,12 @@ class FakeMatcher:
             return _hits_for_band(0.75)
         return _hits_for_band(0.95)
 
-    def match_many(self, product_names: list[str]) -> list[list[dict]]:
+    def match_many(
+        self,
+        product_names: list[str],
+        queries: list[str] | None = None,
+    ) -> list[list[dict]]:
+        del queries
         return [self.match(name) for name in product_names]
 
 
@@ -200,6 +220,7 @@ def test_api_endpoints(client: TestClient) -> int | None:
     """Checks 5–6, 8–9: schemas, CORS, startup matcher, batch triage, all routes."""
     import api.main as main
     from api.schemas import (
+        AnalyticsResponse,
         BatchProcessResponse,
         DecisionResponse,
         HealthResponse,
@@ -287,7 +308,28 @@ def test_api_endpoints(client: TestClient) -> int | None:
             "GET /match/next suggestions include match_id",
             all(s.match_id > 0 for s in match.suggestions),
         )
+        check(
+            "GET /match/next includes match_source and scores",
+            all(
+                s.match_source in {"stage0_exact", "stage0_fuzzy", "ml"}
+                and s.tfidf_score >= 0.0
+                for s in match.suggestions
+            ),
+        )
+        check(
+            "GET /match/next includes product_kind",
+            match.product_kind in {"fresh", "branded", "unknown"},
+        )
         pending_match_id = match.suggestions[0].match_id
+
+    response = client.get("/analytics")
+    check("GET /analytics status 200", response.status_code == 200)
+    if response.status_code == 200:
+        analytics = AnalyticsResponse.model_validate(response.json())
+        check(
+            "GET /analytics includes pipeline_stats",
+            analytics.pipeline_stats.unmatched_triaged >= 1,
+        )
 
     if pending_match_id is not None:
         response = client.post(

@@ -12,10 +12,12 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from ui.api_client import api_get, api_post, get_api_url, is_connection_error
+from ui.api_client import api_get, api_post, api_post_json, get_api_url, is_connection_error
 from ui.utils.styles import (
     conf_bar_html,
     inject_styles,
+    match_source_chip_html,
+    product_kind_pill_html,
     progress_bar_html,
     render_page_header,
     render_page_nav,
@@ -335,8 +337,23 @@ if _review_view in ("approved", "rejected"):
         "Match history",
         "Read-only log of resolved matches from the live database.",
     )
+    def _reopen_match(match_id: int) -> None:
+        data, offline = api_post_json(f"/matches/{match_id}/reopen", timeout=30)
+        if offline:
+            show_offline_card()
+            return
+        if data:
+            st.session_state.last_toast = "Match re-queued for review"
+            st.rerun()
+
     with st.container(border=True):
-        render_match_history_table(history or [], title=title, empty_message=empty)
+        render_match_history_table(
+            history or [],
+            title=title,
+            empty_message=empty,
+            allow_reopen=_review_view == "rejected",
+            on_reopen=_reopen_match if _review_view == "rejected" else None,
+        )
     if _review_view == "approved":
         st.caption(
             f"{auto_approved:,} auto-approved · {operator_approved:,} operator-approved "
@@ -434,6 +451,7 @@ product_name = current.get("product_name", "")
 product_id = current.get("product_id", "")
 brand = current.get("brand") or ""
 weight = current.get("weight") or ""
+product_kind = current.get("product_kind", "unknown")
 suggestions = [s for s in current.get("suggestions", []) if s.get("match_id")][:3]
 
 # De-duplicate by barcode
@@ -478,7 +496,10 @@ with left_col:
                       line-height:1.35; margin-bottom:14px;">
             {product_name}
           </div>
-          <div style="margin-bottom:14px;">{_tags_html_lg(brand, weight)}</div>
+          <div style="margin-bottom:14px;">
+            {product_kind_pill_html(product_kind)}
+            {_tags_html_lg(brand, weight)}
+          </div>
           <hr style="border:none; border-top:1px solid #E5E7EB; margin:0 0 10px 0;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <span style="font-size:11px; color:#9CA3AF;">ID: #{product_id}</span>
@@ -513,6 +534,14 @@ with right_col:
             barcode = suggestion.get("barcode", "")
             explanation = suggestion.get("explanation", "")
             match_id = suggestion.get("match_id")
+            match_source = suggestion.get("match_source", "ml")
+            tfidf_score = float(suggestion.get("tfidf_score", 0))
+            embedding_score = float(suggestion.get("embedding_score", 0))
+            source_chip = match_source_chip_html(match_source)
+            scores_html = (
+                f'<div style="font-size:11px; color:#6B7280; margin-top:4px;">'
+                f"TF-IDF {tfidf_score:.2f} · Embedding {embedding_score:.2f}</div>"
+            )
 
             border = CONF_COLORS.get(label, "#EF4444")
             hover_color = border
@@ -536,9 +565,11 @@ with right_col:
                     f"""
                     <div class="suggestion-card" id="scard-{match_id}"
                          style="border-left:3px solid {border}; {stagger}">
+                      {source_chip}
                       {conf_bar_html(label, score)}
                       <div style="font-size:15px; font-weight:600; color:#111827;
                                   margin-bottom:4px;">{name}</div>
+                      {scores_html}
                       <div style="font-family:monospace; font-size:12px;
                                   color:#9CA3AF; margin-bottom:2px;">{barcode}</div>
                       {expl_html}

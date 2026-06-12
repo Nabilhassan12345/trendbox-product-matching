@@ -715,6 +715,101 @@ def get_daily_outcome_counts() -> List[Dict[str, Any]]:
     return rows
 
 
+def get_pipeline_stats(alias_index_rows: Optional[int] = None) -> Dict[str, Any]:
+    """Aggregate rank-1 resolution method and triage counts from live matches."""
+    from src.match_metadata import infer_match_source
+
+    with get_session() as session:
+        rank1_rows = (
+            session.query(
+                Match.tfidf_score,
+                Match.embedding_score,
+                Match.confidence_score,
+                Match.status,
+            )
+            .filter(Match.rank == 1)
+            .all()
+        )
+
+        stage0_exact = 0
+        stage0_fuzzy = 0
+        ml_resolved = 0
+        for tfidf, embedding, confidence, _status in rank1_rows:
+            source = infer_match_source(tfidf, embedding, confidence)
+            if source == "stage0_exact":
+                stage0_exact += 1
+            elif source == "stage0_fuzzy":
+                stage0_fuzzy += 1
+            else:
+                ml_resolved += 1
+
+        status_rows = (
+            session.query(Match.status, func.count(Match.id))
+            .filter(Match.rank == 1)
+            .group_by(Match.status)
+            .all()
+        )
+        by_status = {status: int(count) for status, count in status_rows}
+
+        canonical_barcoded = (
+            session.query(func.count(Product.id))
+            .filter(Product.has_barcode.is_(True))
+            .scalar()
+            or 0
+        )
+
+    return {
+        "stage0_exact": stage0_exact,
+        "stage0_fuzzy": stage0_fuzzy,
+        "stage0_total": stage0_exact + stage0_fuzzy,
+        "ml_resolved": ml_resolved,
+        "auto_approved": by_status.get(STATUS_AUTO_APPROVED, 0),
+        "auto_rejected": by_status.get(STATUS_AUTO_REJECTED, 0),
+        "pending": by_status.get(STATUS_PENDING, 0),
+        "operator_approved": by_status.get(STATUS_APPROVED, 0),
+        "operator_rejected": by_status.get(STATUS_REJECTED, 0),
+        "canonical_barcoded": int(canonical_barcoded),
+        "alias_index_rows": int(alias_index_rows) if alias_index_rows is not None else None,
+        "unmatched_triaged": len(rank1_rows),
+    }
+
+
+def reopen_auto_rejected(match_id: int) -> Dict[str, Any]:
+    """Move an auto-rejected rank-1 match back into the pending review queue.
+
+    Restores sibling suggestions from ``superseded`` to ``alternative``.
+
+    Raises:
+        ValueError: If the match is missing or not eligible for re-queue.
+    """
+    with get_session() as session:
+        match = session.get(Match, match_id)
+        if match is None:
+            raise ValueError(f"Match id={match_id} not found")
+        if match.rank != 1:
+            raise ValueError("Only rank-1 matches can be re-queued")
+        if match.status != STATUS_AUTO_REJECTED:
+            raise ValueError("Only auto-rejected matches can be re-queued")
+
+        match.status = STATUS_PENDING
+        restored = (
+            session.query(Match)
+            .filter(
+                Match.unmatched_product_id == match.unmatched_product_id,
+                Match.id != match_id,
+                Match.status == STATUS_SUPERSEDED,
+            )
+            .update({Match.status: STATUS_ALTERNATIVE}, synchronize_session=False)
+        )
+        session.flush()
+        logger.info(
+            "Match %s re-queued for review (%s sibling suggestion(s) restored)",
+            match_id,
+            restored,
+        )
+        return match.to_dict(include_products=True)
+
+
 if __name__ == "__main__":
     import tempfile
     from pathlib import Path

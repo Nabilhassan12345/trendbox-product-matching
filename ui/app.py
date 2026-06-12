@@ -22,6 +22,8 @@ from ui.utils.styles import (
     render_section_header,
 )
 
+REFRESH_SECONDS = 30
+
 st.set_page_config(
     page_title="Trendbox · Home",
     page_icon="📦",
@@ -216,6 +218,75 @@ with act_r:
             '<div class="action-meta">Auto-refreshes every 30 seconds</div>',
             unsafe_allow_html=True,
         )
+
+render_divider()
+
+
+def _render_pipeline_snapshot() -> None:
+    """Pipeline snapshot cards — polls /catalog/profile every fragment run."""
+    catalog_profile, catalog_offline = api_get("/catalog/profile", timeout=10)
+    _profile = (catalog_profile or {}).get("profile") or {}
+    _pipeline = (catalog_profile or {}).get("pipeline_stats") or {}
+    _live = (catalog_profile or {}).get("live_stats") or {}
+    _gaps = _profile.get("enrichment_gaps") or {}
+    _alias_rows = _pipeline.get("alias_index_rows")
+    _stage0 = int(_pipeline.get("stage0_total", 0))
+    _missing_wt = float(_gaps.get("unmatched_missing_weight_pct", 0))
+    _pending = int(_live.get("pending", 0))
+
+    render_section_header(
+        "Pipeline snapshot",
+        "Catalog quality and resolution stats from the live database and profile report.",
+    )
+
+    p1, p2, p3, p4 = st.columns(4, gap="medium")
+    with p1:
+        with st.container(border=True):
+            st.markdown('<div class="lb-metric-label">ALIAS INDEX ROWS</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="lb-metric-value">{int(_alias_rows):,}</div>'
+                if _alias_rows is not None
+                else '<div class="lb-metric-value">—</div>',
+                unsafe_allow_html=True,
+            )
+    with p2:
+        with st.container(border=True):
+            st.markdown('<div class="lb-metric-label">STAGE 0 RESOLVED</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="lb-metric-value">{_stage0:,}</div>', unsafe_allow_html=True)
+    with p3:
+        with st.container(border=True):
+            st.markdown('<div class="lb-metric-label">UNMATCHED MISSING WEIGHT</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="lb-metric-value">{_missing_wt:.1f}%</div>', unsafe_allow_html=True)
+    with p4:
+        with st.container(border=True):
+            st.markdown('<div class="lb-metric-label">PENDING REVIEW</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="lb-metric-value amber">{_pending:,}</div>',
+                unsafe_allow_html=True,
+            )
+
+    if catalog_offline or catalog_profile is None:
+        st.caption("Pipeline profile unavailable — start the API and run `scripts/profile_data.py`.")
+    else:
+        btn_col, meta_col = st.columns([1, 3])
+        with btn_col:
+            if st.button("View pipeline details →", key="btn_pipeline", use_container_width=True):
+                st.switch_page("pages/03_Pipeline.py")
+        with meta_col:
+            st.caption(
+                f"Refreshes every {REFRESH_SECONDS} seconds · "
+                f"Last updated: {datetime.now().strftime('%H:%M:%S')}"
+            )
+
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def _pipeline_snapshot_auto_refresh() -> None:
+    _render_pipeline_snapshot()
+
+
+# ── Pipeline snapshot ─────────────────────────────────────────────────────────
+
+_pipeline_snapshot_auto_refresh()
 
 render_divider()
 

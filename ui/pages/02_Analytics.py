@@ -122,6 +122,30 @@ def _filter_daily_outcomes(daily: list[dict], range_key: str) -> list[dict]:
     return filtered
 
 
+def _chart_pipeline_method_split(pipeline_stats: dict) -> go.Figure:
+    """Bar chart of rank-1 resolution methods from live database counts."""
+    labels = ["Stage 0 · Exact", "Stage 0 · Fuzzy", "ML"]
+    values = [
+        int(pipeline_stats.get("stage0_exact", 0)),
+        int(pipeline_stats.get("stage0_fuzzy", 0)),
+        int(pipeline_stats.get("ml_resolved", 0)),
+    ]
+    colors = ["#10B981", "#34D399", "#3B82F6"]
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=values,
+            marker_color=colors,
+            marker_line_width=0,
+            hovertemplate="%{x}: %{y:,}<extra></extra>",
+        )
+    )
+    layout = _base_layout(height=180)
+    layout["yaxis"]["showgrid"] = True
+    fig.update_layout(**layout)
+    return fig
+
+
 def _chart_confidence_buckets(buckets: dict[str, int]) -> go.Figure:
     """Horizontal bar chart for high / medium / low confidence bands."""
     labels = ["High (≥90%)", "Medium (60–90%)", "Low (<60%)"]
@@ -151,13 +175,12 @@ def _chart_confidence_buckets(buckets: dict[str, int]) -> go.Figure:
 # ── Chart builders ────────────────────────────────────────────────────────────
 
 def _chart_cumulative_line(daily: list[dict]) -> go.Figure:
-    """Card 1: Cumulative resolved matches — one point per real calendar day."""
+    """Card 1: Cumulative approved matches — one point per real calendar day."""
     fig = go.Figure()
     if daily:
         df = pd.DataFrame(daily)
         df["day"] = pd.to_datetime(df["day"])
-        df["resolved"] = df["approved"] + df["rejected"]
-        df["cumulative"] = df["resolved"].cumsum()
+        df["cumulative"] = df["approved"].cumsum()
         fig.add_trace(
             go.Scatter(
                 x=df["day"],
@@ -167,7 +190,7 @@ def _chart_cumulative_line(daily: list[dict]) -> go.Figure:
                 marker=dict(size=6, color="#E8622A"),
                 fill="tozeroy",
                 fillcolor="rgba(232,98,42,0.08)",
-                hovertemplate="%{x|%b %d, %Y}<br>%{y:,} resolved<extra></extra>",
+                hovertemplate="%{x|%b %d, %Y}<br>%{y:,} matched<extra></extra>",
             )
         )
     layout = _base_layout()
@@ -288,7 +311,7 @@ def _chart_decisions_stacked(
 
 # ── Metric card renderer ──────────────────────────────────────────────────────
 
-def _metric_card(label: str, value: int | str, fig: go.Figure) -> None:
+def _metric_card(label: str, value: int | str, fig: go.Figure, *, chart_key: str) -> None:
     """Render one cell of the 2x2 grid: label + big number + Plotly chart."""
     value_str = f"{value:,}" if isinstance(value, int) else str(value)
     st.markdown(
@@ -299,7 +322,12 @@ def _metric_card(label: str, value: int | str, fig: go.Figure) -> None:
         f'<div class="lb-metric-value">{value_str}</div>',
         unsafe_allow_html=True,
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"displayModeBar": False},
+        key=chart_key,
+    )
 
 
 # ── Recent decisions table ────────────────────────────────────────────────────
@@ -464,6 +492,7 @@ def _render_dashboard() -> None:
     catalog_total = int(data.get("catalog_total") or stats.get("total_products", 0))
     auto_rejected = int(data.get("auto_rejected", 0))
     manual_minutes = int(data.get("manual_minutes_per_match", DEFAULT_MANUAL_MINUTES))
+    pipeline_stats = data.get("pipeline_stats") or {}
     analytics_view = st.session_state.get("analytics_nav", "Throughput")
 
     matched = int(stats["matched"])
@@ -497,6 +526,10 @@ def _render_dashboard() -> None:
             "Quality",
             "Confidence score distribution across rank-1 suggestions.",
         ),
+        "Pipeline": (
+            "Pipeline",
+            "How unmatched products were resolved — Stage 0 blocking vs ML matching.",
+        ),
     }
     view_title, view_desc = _view_copy.get(analytics_view, _view_copy["Throughput"])
 
@@ -511,7 +544,7 @@ def _render_dashboard() -> None:
     with tab_col:
         st.radio(
             "View",
-            ["Throughput", "Efficiency", "Quality"],
+            ["Throughput", "Pipeline", "Efficiency", "Quality"],
             horizontal=True,
             label_visibility="collapsed",
             key="analytics_nav",
@@ -552,7 +585,12 @@ def _render_dashboard() -> None:
 
         with row1_c1:
             with st.container(border=True):
-                _metric_card("Matched", matched, _chart_cumulative_line(daily_outcomes))
+                _metric_card(
+                    "Matched",
+                    matched,
+                    _chart_cumulative_line(daily_outcomes),
+                    chart_key="throughput_matched",
+                )
 
         with row1_c2:
             with st.container(border=True):
@@ -560,6 +598,7 @@ def _render_dashboard() -> None:
                     "Auto-Approved",
                     auto_approved,
                     _chart_daily_auto_approved_bar(daily_outcomes),
+                    chart_key="throughput_auto_approved",
                 )
 
         with row2_c1:
@@ -568,6 +607,7 @@ def _render_dashboard() -> None:
                     "Operator Approved",
                     operator_approved,
                     _chart_daily_operator_bar(daily_outcomes),
+                    chart_key="throughput_operator_approved",
                 )
 
         with row2_c2:
@@ -580,12 +620,94 @@ def _render_dashboard() -> None:
                         approved_total=matched,
                         rejected_total=rejected,
                     ),
+                    chart_key="throughput_decisions",
                 )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         with st.container(border=True):
             _render_decisions_table(recent_decisions, decision_filter)
+
+    # ── PIPELINE ────────────────────────────────────────────────────────────
+    elif analytics_view == "Pipeline":
+        render_section_header(
+            "Resolution breakdown",
+            "Rank-1 outcomes from the live database — Stage 0 runs before TF-IDF and embeddings.",
+        )
+        p1, p2, p3, p4 = st.columns(4, gap="medium")
+        with p1:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">STAGE 0 · EXACT</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(pipeline_stats.get("stage0_exact", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+        with p2:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">STAGE 0 · FUZZY</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(pipeline_stats.get("stage0_fuzzy", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+        with p3:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">ML RESOLVED</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(pipeline_stats.get("ml_resolved", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+        with p4:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">STAGE 0 TOTAL</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(pipeline_stats.get("stage0_total", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        t1, t2, t3 = st.columns(3, gap="medium")
+        with t1:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">AUTO-APPROVED</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(pipeline_stats.get("auto_approved", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+        with t2:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">PENDING REVIEW</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value amber">{int(pipeline_stats.get("pending", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+        with t3:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">AUTO-REJECTED</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(pipeline_stats.get("auto_rejected", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.container(border=True):
+            section_label("RESOLUTION METHOD SPLIT (RANK-1)")
+            st.plotly_chart(
+                _chart_pipeline_method_split(pipeline_stats),
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key="pipeline_method_split",
+            )
+            alias_rows = pipeline_stats.get("alias_index_rows")
+            canonical = int(pipeline_stats.get("canonical_barcoded", 0))
+            index_note = (
+                f"Search index: {int(alias_rows):,} alias rows · "
+                f"{canonical:,} canonical barcoded products in DB"
+                if alias_rows is not None
+                else f"Canonical barcoded products in DB: {canonical:,}"
+            )
+            st.caption(
+                f"{int(pipeline_stats.get('unmatched_triaged', 0)):,} unmatched products triaged · "
+                f"{index_note}"
+            )
 
     # ── EFFICIENCY ──────────────────────────────────────────────────────────
     elif analytics_view == "Efficiency":
@@ -667,7 +789,7 @@ def _render_dashboard() -> None:
                 )
 
     # ── QUALITY ───────────────────────────────────────────────────────────────
-    else:
+    elif analytics_view == "Quality":
         render_section_header(
             "Match confidence",
             "How reliably the model ranks its top suggestion per product.",
@@ -703,6 +825,7 @@ def _render_dashboard() -> None:
                 _chart_confidence_buckets(confidence_buckets),
                 use_container_width=True,
                 config={"displayModeBar": False},
+                key="quality_confidence_distribution",
             )
             st.caption(
                 f"Low confidence: {int(confidence_buckets.get('low', 0)):,} · "

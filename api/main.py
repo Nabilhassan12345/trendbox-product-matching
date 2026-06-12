@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -17,15 +19,18 @@ from sqlalchemy import func
 from api.schemas import (
     AnalyticsResponse,
     BatchProcessResponse,
+    CatalogProfileResponse,
     ConfidenceBuckets,
     DecisionRequest,
     DecisionResponse,
     HealthResponse,
     MatchResponse,
     MatchSuggestion,
+    PipelineStats,
     RecentDecisionRow,
     DailyOutcomePoint,
     RecentMatchRow,
+    ReopenResponse,
     StatsResponse,
 )
 from src.batch import process_unmatched
@@ -43,16 +48,20 @@ from src.database import (
     Product,
     get_confidence_scores,
     get_daily_outcome_counts,
+    get_pipeline_stats,
     get_recent_activity,
     get_recent_decisions,
     get_recent_matches_by_outcome,
     get_session,
     get_stats,
     init_db,
+    reopen_auto_rejected,
     save_decision,
     replace_matches,
 )
+from src.match_metadata import explanation_from_stored, infer_match_source
 from src.matcher import ProductMatcher
+from src.preprocess import classify_product_kind
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +71,12 @@ load_dotenv()
 
 DB_PATH = os.getenv("TRENDBOX_DB_PATH", "data/matching.db")
 MATCHER_INDEX_PATH = os.getenv("TRENDBOX_MATCHER_INDEX", "data/matcher_index")
+CATALOG_PROFILE_PATH = Path(
+    os.getenv(
+        "TRENDBOX_CATALOG_PROFILE",
+        "data/reports/catalog_profile.json",
+    )
+)
 TOP_SUGGESTIONS = 3
 
 matcher: ProductMatcher | None = None
@@ -168,6 +183,29 @@ def _get_next_pending_product_id() -> int | None:
         return match.unmatched_product_id if match else None
 
 
+def _alias_index_row_count() -> int | None:
+    """Return matcher index row count when the FAISS/TF-IDF cache is loaded."""
+    if matcher is None or not matcher._built:
+        return None
+    ref_df = matcher.tfidf.reference_df
+    if ref_df is None or ref_df.empty:
+        return None
+    return len(ref_df)
+
+
+def _embedder_for_explanations() -> Any | None:
+    """Return the loaded embedder, if any, for ML explanation text."""
+    if matcher is None or not matcher._built:
+        return None
+    return getattr(matcher, "embedder", None)
+
+
+def _build_pipeline_stats_response() -> PipelineStats:
+    """Build pipeline stats from the live database and optional index size."""
+    raw = get_pipeline_stats(alias_index_rows=_alias_index_row_count())
+    return PipelineStats(**raw)
+
+
 def _build_match_response(unmatched_product_id: int) -> MatchResponse:
     """Assemble a review payload for one unmatched product."""
     pending_matches = _get_open_matches_for_product(unmatched_product_id)
@@ -176,20 +214,30 @@ def _build_match_response(unmatched_product_id: int) -> MatchResponse:
 
     unmatched = pending_matches[0]["unmatched_product"]
     product_name = unmatched["name"]
-
-    explanation_by_barcode: dict[str, str] = {}
-    try:
-        active_matcher = _require_matcher()
-        for hit in active_matcher.match(product_name)[:TOP_SUGGESTIONS]:
-            explanation_by_barcode[str(hit["barcode"])] = hit["explanation"]
-    except HTTPException:
-        pass
+    product_kind = classify_product_kind(
+        product_name,
+        unmatched.get("brand"),
+        unmatched.get("weight"),
+    )
+    embedder = _embedder_for_explanations()
 
     suggestions: list[MatchSuggestion] = []
     for row in pending_matches:
         suggested = row["suggested_product"]
         barcode = str(suggested["barcode"] or "")
         confidence = float(row["confidence_score"])
+        tfidf = float(row["tfidf_score"])
+        embedding = float(row["embedding_score"])
+        source = infer_match_source(tfidf, embedding, confidence)
+        explanation = explanation_from_stored(
+            source,
+            query=product_name,
+            candidate_name_clean=str(suggested.get("name_clean") or suggested["name"]),
+            tfidf_score=tfidf,
+            embedding_score=embedding,
+            confidence_score=confidence,
+            embedder=embedder,
+        )
         suggestions.append(
             MatchSuggestion(
                 match_id=row["id"],
@@ -199,7 +247,10 @@ def _build_match_response(unmatched_product_id: int) -> MatchResponse:
                 confidence_score=confidence,
                 confidence_label=row["confidence_label"],
                 confidence_color=get_confidence_color(confidence),
-                explanation=explanation_by_barcode.get(barcode, ""),
+                explanation=explanation,
+                match_source=source,
+                tfidf_score=tfidf,
+                embedding_score=embedding,
             )
         )
 
@@ -208,6 +259,7 @@ def _build_match_response(unmatched_product_id: int) -> MatchResponse:
         product_name=product_name,
         brand=unmatched.get("brand"),
         weight=unmatched.get("weight"),
+        product_kind=product_kind,
         suggestions=suggestions,
     )
 
@@ -293,16 +345,24 @@ def _build_recent_match_rows(outcome: str, limit: int = 50) -> list[RecentMatchR
         unmatched = item.get("unmatched_product") or {}
         suggested = item.get("suggested_product") or {}
         status = str(item.get("status", ""))
+        tfidf = float(item.get("tfidf_score", 0.0))
+        embedding = float(item.get("embedding_score", 0.0))
+        confidence = float(item.get("confidence_score", 0.0))
+        match_source = infer_match_source(tfidf, embedding, confidence)
         rows.append(
             RecentMatchRow(
+                match_id=int(item.get("id", 0)),
                 product_name=str(unmatched.get("name", "—")),
                 matched_to=str(suggested.get("name", "—")),
                 barcode=str(suggested.get("barcode") or ""),
-                confidence=float(item.get("confidence_score", 0.0)),
+                confidence=confidence,
                 confidence_label=str(item.get("confidence_label", "")),
                 status=status,
                 source=_match_source(status),
                 time=str(item.get("event_time") or item.get("created_at", "")),
+                match_source=match_source,
+                tfidf_score=tfidf,
+                embedding_score=embedding,
             )
         )
     return rows
@@ -325,6 +385,7 @@ def _build_analytics_response() -> AnalyticsResponse:
         confidence_buckets=_confidence_buckets(scores),
         daily_outcomes=daily_outcomes,
         recent_decisions=_build_recent_decision_rows(20),
+        pipeline_stats=_build_pipeline_stats_response(),
     )
 
 
@@ -384,6 +445,47 @@ def stats() -> StatsResponse:
 def analytics() -> AnalyticsResponse:
     """Return full analytics data for the Streamlit dashboard."""
     return _build_analytics_response()
+
+
+@app.get("/catalog/profile", response_model=CatalogProfileResponse)
+def catalog_profile() -> CatalogProfileResponse:
+    """Return catalog quality profile JSON merged with live database stats."""
+    if not CATALOG_PROFILE_PATH.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Catalog profile not found at {CATALOG_PROFILE_PATH}",
+        )
+    try:
+        profile = json.loads(CATALOG_PROFILE_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Invalid catalog profile JSON") from exc
+
+    return CatalogProfileResponse(
+        profile=profile,
+        live_stats=_build_stats_response(),
+        pipeline_stats=_build_pipeline_stats_response(),
+    )
+
+
+@app.post("/matches/{match_id}/reopen", response_model=ReopenResponse)
+def reopen_match(match_id: int) -> ReopenResponse:
+    """Re-queue an auto-rejected rank-1 match for operator review."""
+    try:
+        reopen_auto_rejected(match_id)
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=422, detail=message) from exc
+    except Exception as exc:
+        logger.exception("Failed to reopen match_id=%s", match_id)
+        raise HTTPException(status_code=500, detail="Failed to re-queue match") from exc
+
+    return ReopenResponse(
+        success=True,
+        match_id=match_id,
+        next_pending_count=_pending_review_count(),
+    )
 
 
 @app.get("/matches/recent", response_model=list[RecentMatchRow])

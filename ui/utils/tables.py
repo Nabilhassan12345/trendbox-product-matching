@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Callable
 
 import streamlit as st
 
@@ -23,13 +24,30 @@ def format_timestamp(ts: str) -> str:
         return ts
 
 
+def _method_label(match_source: str | None) -> str:
+    labels = {
+        "stage0_exact": "Stage 0 · Exact",
+        "stage0_fuzzy": "Stage 0 · Fuzzy",
+        "ml": "ML",
+    }
+    return labels.get(str(match_source or "ml"), "ML")
+
+
+def _score_title(row: dict) -> str:
+    tfidf = float(row.get("tfidf_score", 0))
+    embedding = float(row.get("embedding_score", 0))
+    return f"TF-IDF {tfidf:.3f} · Embedding {embedding:.3f}"
+
+
 def render_match_history_table(
     rows: list[dict],
     *,
     title: str,
     empty_message: str,
+    allow_reopen: bool = False,
+    on_reopen: Callable[[int], None] | None = None,
 ) -> None:
-    """Render a read-only match history table backed by /matches/recent."""
+    """Render match history backed by /matches/recent."""
     section_label(title)
 
     if not rows:
@@ -39,6 +57,81 @@ def render_match_history_table(
             "</div>",
             unsafe_allow_html=True,
         )
+        return
+
+    if allow_reopen:
+        header = st.columns([2.4, 2.4, 1.0, 1.0, 0.8, 0.8, 1.0, 0.9])
+        labels = [
+            "Product Name",
+            "Matched To",
+            "Confidence",
+            "Method",
+            "Source",
+            "Outcome",
+            "Time",
+            "Action",
+        ]
+        for col, label in zip(header, labels):
+            col.markdown(
+                f'<div class="lb-table-header" style="padding:8px 4px; font-size:11px;">'
+                f"{label}</div>",
+                unsafe_allow_html=True,
+            )
+
+        for i, row in enumerate(rows):
+            product = row.get("product_name", "—")
+            matched = row.get("matched_to", "—")
+            conf = float(row.get("confidence", 0))
+            source = str(row.get("source", "auto"))
+            status = str(row.get("status", ""))
+            ts = format_timestamp(str(row.get("time", "")))
+            match_id = int(row.get("match_id", 0))
+            method = _method_label(row.get("match_source"))
+            score_tip = _score_title(row)
+
+            approved = status in {"auto_approved", "approved"} or row.get("decision") == "approved"
+            outcome = "Approved" if approved else "Rejected"
+            outcome_color = "#065F46" if approved else "#991B1B"
+            conf_label = row.get("confidence_label") or (
+                "HIGH" if conf >= 0.9 else ("MEDIUM" if conf >= 0.6 else "LOW")
+            )
+            source_label = "Auto" if source == "auto" else "Operator"
+
+            cols = st.columns([2.4, 2.4, 1.0, 1.0, 0.8, 0.8, 1.0, 0.9])
+            cols[0].markdown(
+                f'<span title="{product}" style="font-size:13px;">{product[:36]}</span>',
+                unsafe_allow_html=True,
+            )
+            cols[1].markdown(
+                f'<span title="{matched}" style="font-size:13px;">{matched[:36]}</span>',
+                unsafe_allow_html=True,
+            )
+            cols[2].markdown(badge_html(str(conf_label).upper(), conf), unsafe_allow_html=True)
+            cols[3].markdown(
+                f'<span title="{score_tip}" style="font-size:12px; color:#6B7280;">{method}</span>',
+                unsafe_allow_html=True,
+            )
+            cols[4].markdown(
+                f'<span style="font-size:12px;">{source_label}</span>',
+                unsafe_allow_html=True,
+            )
+            cols[5].markdown(
+                f'<span style="font-size:12px; font-weight:600; color:{outcome_color};">'
+                f"{outcome}</span>",
+                unsafe_allow_html=True,
+            )
+            cols[6].markdown(
+                f'<span style="font-size:12px; color:#9CA3AF;">{ts}</span>',
+                unsafe_allow_html=True,
+            )
+            with cols[7]:
+                if status == "auto_rejected" and match_id > 0 and on_reopen is not None:
+                    if st.button("Re-queue", key=f"reopen_{match_id}_{i}", use_container_width=True):
+                        on_reopen(match_id)
+                else:
+                    st.markdown('<span style="color:#D1D5DB;">—</span>', unsafe_allow_html=True)
+
+        st.caption(f"Showing {len(rows):,} most recent")
         return
 
     st.markdown(
@@ -62,11 +155,12 @@ def render_match_history_table(
         """
         <div style="border:1px solid #E5E7EB; border-radius:8px; overflow:hidden;">
         <div class="lb-table-header" style="display:grid;
-             grid-template-columns:1fr 1fr 120px 90px 110px 130px;
+             grid-template-columns:1fr 1fr 120px 100px 90px 110px 130px;
              gap:8px; padding:8px 15px;">
           <span>Product Name</span>
           <span>Matched To</span>
           <span>Confidence</span>
+          <span>Method</span>
           <span>Source</span>
           <span>Outcome</span>
           <span>Time</span>
@@ -82,6 +176,8 @@ def render_match_history_table(
         source = str(row.get("source", "auto"))
         status = str(row.get("status", ""))
         ts = format_timestamp(str(row.get("time", "")))
+        method = _method_label(row.get("match_source"))
+        score_tip = _score_title(row)
 
         approved = status in {"auto_approved", "approved"} or row.get("decision") == "approved"
         left_border = "#10B981" if approved else "#EF4444"
@@ -99,7 +195,7 @@ def render_match_history_table(
             f"""
             <div class="decision-row" style="
                  display:grid;
-                 grid-template-columns:1fr 1fr 120px 90px 110px 130px;
+                 grid-template-columns:1fr 1fr 120px 100px 90px 110px 130px;
                  gap:8px; padding:10px 12px; border-top:1px solid #F3F4F6;
                  border-left:3px solid {left_border};
                  background:{bg}; font-size:13px; color:#374151; align-items:center;">
@@ -108,6 +204,7 @@ def render_match_history_table(
               <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
                     title="{matched}">{matched[:42]}</span>
               <span>{conf_badge}</span>
+              <span title="{score_tip}" style="font-size:12px; color:#6B7280;">{method}</span>
               <span><span class="source-pill {source_cls}">{source_label}</span></span>
               <span style="font-weight:600; color:{outcome_color};">{outcome}</span>
               <span style="color:#9CA3AF;">{ts}</span>
@@ -119,10 +216,10 @@ def render_match_history_table(
     st.markdown(
         f"""
         <div class="lb-table-total" style="display:grid;
-             grid-template-columns:1fr 1fr 120px 90px 110px 130px;
+             grid-template-columns:1fr 1fr 120px 100px 90px 110px 130px;
              gap:8px; padding:10px 15px; border-top:1px solid #E5E7EB;">
           <span>Showing {len(rows):,} most recent</span>
-          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span><span></span>
         </div>
         </div>
         """,

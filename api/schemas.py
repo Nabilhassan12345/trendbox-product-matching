@@ -18,6 +18,9 @@ class MatchSuggestion(BaseModel):
     confidence_label: str
     confidence_color: str
     explanation: str
+    match_source: Literal["stage0_exact", "stage0_fuzzy", "ml"] = "ml"
+    tfidf_score: float = 0.0
+    embedding_score: float = 0.0
 
 
 class MatchResponse(BaseModel):
@@ -27,6 +30,7 @@ class MatchResponse(BaseModel):
     product_name: str
     brand: str | None = None
     weight: str | None = None
+    product_kind: Literal["fresh", "branded", "unknown"] = "unknown"
     suggestions: list[MatchSuggestion]
 
 
@@ -115,6 +119,7 @@ class RecentDecisionRow(BaseModel):
 class RecentMatchRow(BaseModel):
     """Flattened row for the review history tabs."""
 
+    match_id: int
     product_name: str
     matched_to: str
     barcode: str
@@ -123,6 +128,42 @@ class RecentMatchRow(BaseModel):
     status: str
     source: str
     time: str
+    match_source: Literal["stage0_exact", "stage0_fuzzy", "ml"] = "ml"
+    tfidf_score: float = 0.0
+    embedding_score: float = 0.0
+
+
+class PipelineStats(BaseModel):
+    """Live rank-1 resolution and triage breakdown from the database."""
+
+    stage0_exact: int
+    stage0_fuzzy: int
+    stage0_total: int
+    ml_resolved: int
+    auto_approved: int
+    auto_rejected: int
+    pending: int
+    operator_approved: int
+    operator_rejected: int
+    canonical_barcoded: int
+    alias_index_rows: int | None = None
+    unmatched_triaged: int
+
+
+class CatalogProfileResponse(BaseModel):
+    """Catalog quality profile merged with live database counts."""
+
+    profile: dict
+    live_stats: StatsResponse
+    pipeline_stats: PipelineStats
+
+
+class ReopenResponse(BaseModel):
+    """Result of re-queuing an auto-rejected match."""
+
+    success: bool
+    match_id: int
+    next_pending_count: int
 
 
 class AnalyticsResponse(BaseModel):
@@ -139,3 +180,4 @@ class AnalyticsResponse(BaseModel):
         description="Assumed manual review minutes per match (efficiency estimate only)",
     )
     recent_decisions: list[RecentDecisionRow]
+    pipeline_stats: PipelineStats
