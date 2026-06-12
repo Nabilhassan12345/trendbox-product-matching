@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trendbox-product-matching"
+version = "1.0.0"
+description = "ML system for matching unmatched Turkish retail products to a barcoded reference catalogue."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "pandas==3.0.3",
+    "scikit-learn==1.9.0",
+    "numpy==2.4.6",
+    "joblib==1.5.3",
+    "sentence-transformers==5.5.1",
+    "torch==2.12.0",
+    "faiss-cpu==1.14.2",
+    "fastapi==0.136.3",
+    "uvicorn==0.49.0",
+    "sqlalchemy==2.0.50",
+    "pydantic==2.13.4",
+    "streamlit==1.58.0",
+    "plotly==6.8.0",
+    "requests==2.34.2",
+    "python-dotenv==1.2.2",
+]
+
+[project.optional-dependencies]
+notebooks = ["matplotlib==3.10.9"]
+dev = [
+    "matplotlib==3.10.9",
+    "pytest==8.4.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+
+[project.scripts]
+trendbox = "pipeline:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "api*", "ui*"]
+
+[tool.setuptools]
+py-modules = ["pipeline"]

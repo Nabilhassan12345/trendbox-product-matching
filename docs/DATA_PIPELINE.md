@@ -100,6 +100,19 @@ Or batch only (after indexes exist):
 python scripts/run_batch.py
 ```
 
+## Matcher index cache
+
+All TF-IDF, FAISS, and embedding artifacts live in one directory (default `data/matcher_index/`):
+
+| File | Purpose |
+|------|---------|
+| `tfidf.joblib` | Stage 1 character TF-IDF index |
+| `embedding_index.faiss` | Stage 2 FAISS vector index |
+| `embedding_index_meta.joblib` | FAISS row metadata |
+| `reference_embeddings.npy` | Cached reference embeddings |
+
+`pipeline.py` builds here; the API loads from here on startup. Override with `TRENDBOX_MATCHER_INDEX` in `.env`.
+
 ## File map
 
 | File | Role |

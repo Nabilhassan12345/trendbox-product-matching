@@ -7,7 +7,7 @@ from typing import Dict, List, Set
 
 import pandas as pd
 
-from src.database import _dedupe_barcoded, _dedupe_unmatched
+from src.db.catalog import dedupe_barcoded, dedupe_unmatched
 from src.preprocess import enrich_dataframe
 
 logger = logging.getLogger(__name__)
@@ -15,12 +15,12 @@ logger = logging.getLogger(__name__)
 
 def canonical_barcoded(df_barcoded: pd.DataFrame) -> pd.DataFrame:
     """Return one row per barcode for SQLite persistence."""
-    return _dedupe_barcoded(df_barcoded)
+    return dedupe_barcoded(df_barcoded)
 
 
 def canonical_unmatched(df_unmatched: pd.DataFrame) -> pd.DataFrame:
     """Return one row per cleaned unmatched name for SQLite persistence."""
-    return _dedupe_unmatched(df_unmatched)
+    return dedupe_unmatched(df_unmatched)
 
 
 def prepare_reference_index(df_barcoded: pd.DataFrame) -> pd.DataFrame:

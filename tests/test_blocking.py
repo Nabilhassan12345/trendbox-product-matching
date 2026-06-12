@@ -3,32 +3,19 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 import pandas as pd
 
 from src.blocking import Stage0Resolver
 from src.confidence import triage
+from src.config import DATA_CSV
 from src.preprocess import load_and_clean
 from src.reference_catalog import prepare_reference_index
 
-RESULTS: list[bool] = []
-
-
-def check(name: str, expected: object, actual: object) -> None:
-    ok = expected == actual
-    status = "PASS" if ok else "FAIL"
-    detail = "" if ok else f"  (expected {expected!r}, got {actual!r})"
-    print(f"[{status}] {name}{detail}")
-    RESULTS.append(ok)
+from tests.helpers import check_eq as check
 
 
 def _make_index() -> pd.DataFrame:
-    df_barcoded, _ = load_and_clean(str(ROOT / "data" / "mix_products.csv"))
+    df_barcoded, _ = load_and_clean(str(DATA_CSV))
     return prepare_reference_index(df_barcoded)
 
 
@@ -83,19 +70,3 @@ def test_no_match() -> None:
     print("\n=== no match ===\n")
     resolver = Stage0Resolver(_make_index())
     check("unknown product", None, resolver.resolve("zzzzzzzzzzzzzzzz product 99999"))
-
-
-def main() -> int:
-    test_exact_single_barcode()
-    test_exact_multi_barcode_pending()
-    test_fuzzy_spelling()
-    test_no_match()
-
-    passed = sum(RESULTS)
-    total = len(RESULTS)
-    print(f"\n=== Summary: {passed}/{total} passed ===")
-    return 0 if passed == total else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

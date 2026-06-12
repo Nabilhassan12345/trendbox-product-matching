@@ -15,6 +15,7 @@ Requires **Python 3.10+**.
 git clone https://github.com/Nabilhassan12345/trendbox-product-matching.git
 cd trendbox-product-matching
 pip install -r requirements.txt
+pip install -e .          # optional: editable install (removes sys.path hacks)
 python pipeline.py
 ```
 
@@ -56,36 +57,53 @@ The 50/50 weighting and mismatch penalties are evidence-based: evaluation showed
 | Reranking (Stage 2) | sentence-transformers + FAISS |
 | Persistence | SQLAlchemy + SQLite |
 | API | FastAPI + Pydantic |
-| UI | Streamlit + Altair |
+| UI | Streamlit + Plotly |
 | Data / caching | pandas, joblib |
 
 ## Project Structure
 
 ```
-pipeline.py            # Single entry point: load → index → batch → API → UI
+pipeline.py              # Single entry point: load → index → batch → API → UI
+pyproject.toml           # Package metadata + `trendbox` CLI entry point
 src/
-  preprocess.py        # Turkish normalisation, brand/weight extraction, product kind
-  reference_catalog.py # Canonical DB rows vs full alias search index
-  blocking.py          # Stage 0 exact/fuzzy name resolver
-  data_profile.py      # Catalogue quality metrics
-  tfidf_retriever.py   # Stage 1: TF-IDF retrieval
-  embedding_reranker.py# Stage 2: embeddings, FAISS, batched rerank
-  confidence.py        # Ensemble scoring + triage bands
-  matcher.py           # Orchestrates the two-stage pipeline
-  batch.py             # Product-level batch triage
-  database.py          # SQLAlchemy models + persistence
-api/                   # FastAPI app (main.py) + Pydantic schemas
-ui/                    # Streamlit home, Review and Analytics pages
-notebooks/             # 01_exploration, 02_experiments
-scripts/               # evaluate.py (recall@k sweep), profile_data.py, run_batch.py
-tests/                 # Unit + API integration suites
+  config.py              # Central paths, ports, env overrides
+  db/                    # ORM models, session, catalog, matches, analytics
+  index_builder.py       # TF-IDF / FAISS build + cache (data/matcher_index/)
+  preprocess.py          # Turkish normalisation, brand/weight extraction, product kind
+  reference_catalog.py   # Canonical DB rows vs full alias search index
+  blocking.py            # Stage 0 exact/fuzzy name resolver
+  data_profile.py        # Catalogue quality metrics
+  tfidf_retriever.py     # Stage 1: TF-IDF retrieval
+  embedding_reranker.py  # Stage 2: embeddings, FAISS, batched rerank
+  confidence.py          # Ensemble scoring + triage bands
+  matcher.py             # Orchestrates the two-stage pipeline
+  batch.py               # Product-level batch triage (shared by pipeline + API)
+  database.py            # SQLAlchemy models + persistence
+api/                     # FastAPI app (main.py) + Pydantic schemas
+ui/
+  app.py                 # Streamlit home
+  pages/01_Review.py     # Operator review queue
+  pages/02_Analytics.py  # Match-rate and confidence dashboards
+  pages/03_Pipeline.py   # Catalog quality and pipeline stats
+  utils/theme.py         # CSS design tokens
+  utils/components.py    # HTML badge/chip builders
+  utils/layout.py        # Page headers and navigation
+  utils/charts.py        # Shared Plotly chart builders
+notebooks/               # 01_exploration, 02_experiments
+scripts/                 # evaluate.py, profile_data.py, run_batch.py
+tests/                   # Unit + API integration suites
+docs/                    # DATA_PIPELINE.md, CALISMA_RAPORU.md (Turkish report)
+data/reports/            # Generated JSON reports (catalog profile, evaluation)
 ```
 
 ## Testing & Evaluation
 
 ```bash
-python tests/run_all_tests.py                 # full verification (6 suites)
+pytest tests/                                 # unit + API integration tests
+python tests/run_all_tests.py                 # full verification (files + imports + pytest)
 python scripts/evaluate.py --max-queries 1000 # recall@k + precision/coverage sweep
+python scripts/profile_data.py                # write data/reports/catalog_profile.json
+python scripts/run_batch.py                   # re-run matching without starting API/UI
 ```
 
 The evaluation mines ground truth from the catalogue itself (products sharing a barcode but spelled differently), holds each spelling out of the index, and checks whether the pipeline recovers the correct barcode. It reports **Recall@1/@3** for each approach plus a **precision-vs-coverage sweep** — the evidence behind the confidence thresholds.
@@ -113,9 +131,13 @@ All variables are optional (sensible defaults). Copy `.env.example` to `.env` to
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `TRENDBOX_DATA_CSV` | `data/mix_products.csv` | Source catalogue CSV |
 | `TRENDBOX_DB_PATH` | `data/matching.db` | SQLite database path |
-| `TRENDBOX_MATCHER_INDEX` | `data/matcher_index` | Matcher index directory |
+| `TRENDBOX_MATCHER_INDEX` | `data/matcher_index` | Matcher index directory (API load path) |
+| `TRENDBOX_CATALOG_PROFILE` | `data/reports/catalog_profile.json` | Catalog quality report |
 | `TRENDBOX_API_URL` | `http://localhost:8000` | API base URL for the UI |
+| `TRENDBOX_API_PORT` | `8000` | API port when started by `pipeline.py` |
+| `TRENDBOX_UI_PORT` | `8501` | Streamlit port when started by `pipeline.py` |
 
 ## License
 

@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from src.database import _dedupe_barcoded, _dedupe_unmatched
+from src.db.catalog import dedupe_barcoded, dedupe_unmatched
 from src.preprocess import load_and_clean
 
 logger = logging.getLogger(__name__)
@@ -62,8 +62,8 @@ def profile_catalog(filepath: str) -> Dict[str, Any]:
     empty_barcoded_names = int((df_barcoded["name"].str.strip() == "").sum())
     empty_unmatched_names = int((df_unmatched["name"].str.strip() == "").sum())
 
-    canonical_barcoded = _dedupe_barcoded(df_barcoded)
-    canonical_unmatched = _dedupe_unmatched(df_unmatched)
+    canonical_barcoded = dedupe_barcoded(df_barcoded)
+    canonical_unmatched = dedupe_unmatched(df_unmatched)
     barcoded_rows_dropped = barcoded_rows - len(canonical_barcoded)
     unmatched_rows_dropped = unmatched_rows - len(canonical_unmatched)
 

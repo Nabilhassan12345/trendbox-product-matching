@@ -15,19 +15,22 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from src.blocking import Stage0Resolver
 from src.confidence import triage
-from src.preprocess import normalize, normalize_batch
+from src.config import TOP_SUGGESTIONS
 from src.database import (
     STATUS_ALTERNATIVE,
     STATUS_AUTO_APPROVED,
     STATUS_AUTO_REJECTED,
     STATUS_PENDING,
     STATUS_SUPERSEDED,
+    Product,
+    get_session,
+    replace_matches,
 )
+from src.preprocess import normalize, normalize_batch
 
 logger = logging.getLogger(__name__)
-
-TOP_SUGGESTIONS = 3
 
 _PRIMARY_STATUS = {
     "auto_approve": STATUS_AUTO_APPROVED,
@@ -175,4 +178,70 @@ def process_unmatched(
         f"{counts['stage0_resolved']:,}",
     )
 
+    return records, counts
+
+
+def _load_batch_inputs() -> tuple[list[tuple[int, str]], dict[str, int]]:
+    """Read unmatched products and barcode→id map from the database."""
+    with get_session() as session:
+        unmatched_products = [
+            (product.id, product.name)
+            for product in session.query(Product)
+            .filter(Product.has_barcode.is_(False))
+            .order_by(Product.id)
+            .all()
+        ]
+        barcode_rows = (
+            session.query(Product.id, Product.barcode)
+            .filter(Product.has_barcode.is_(True), Product.barcode.isnot(None))
+            .order_by(Product.id)
+            .all()
+        )
+        barcode_to_id: dict[str, int] = {}
+        for product_id, barcode in barcode_rows:
+            if barcode not in barcode_to_id:
+                barcode_to_id[barcode] = product_id
+    return unmatched_products, barcode_to_id
+
+
+def _resolve_stage0(matcher: Any, stage0_df: Optional[Any]) -> Optional[Stage0Resolver]:
+    """Build a Stage 0 resolver from an explicit frame or the matcher's reference index."""
+    if stage0_df is not None:
+        return Stage0Resolver(stage0_df)
+    ref_df = matcher.tfidf.reference_df
+    if ref_df is not None and not ref_df.empty:
+        return Stage0Resolver(ref_df)
+    return None
+
+
+def run_full_batch(
+    matcher: Any,
+    *,
+    stage0_df: Optional[Any] = None,
+    progress_every: int = 500,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Match all unmatched products, persist suggestions, and return outcome counts.
+
+    Shared entry point for ``pipeline.py``, ``scripts/run_batch.py``, and the
+    API ``POST /batch_process`` endpoint so batch behaviour never diverges.
+
+    Raises:
+        RuntimeError: When the matcher index is not built or no unmatched rows exist.
+    """
+    if not matcher._built:
+        raise RuntimeError("Matcher is not built — cannot run batch processing.")
+
+    unmatched_products, barcode_to_id = _load_batch_inputs()
+    if not unmatched_products:
+        raise RuntimeError("No unmatched products in database.")
+
+    stage0 = _resolve_stage0(matcher, stage0_df)
+    records, counts = process_unmatched(
+        matcher,
+        unmatched_products,
+        barcode_to_id,
+        stage0=stage0,
+        progress_every=progress_every,
+    )
+    replace_matches(records)
     return records, counts

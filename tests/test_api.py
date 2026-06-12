@@ -16,19 +16,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-RESULTS: list[bool] = []
-
-
-def check(name: str, condition: bool, detail: str = "") -> bool:
-    """Record and print a single PASS/FAIL result."""
-    status = "PASS" if condition else "FAIL"
-    suffix = f" — {detail}" if detail else ""
-    print(f"[{status}] {name}{suffix}")
-    RESULTS.append(condition)
-    return condition
+from tests.helpers import check_true as check
 
 
 def _make_hit(rank: int, barcode: str, name: str, confidence: float) -> dict:
@@ -129,15 +117,13 @@ def _seed_products(db_path: str) -> None:
     load_products(df_barcoded, df_unmatched)
 
 
-def test_database_layer(db_path: str) -> None:
+def _assert_database_layer(db_path: str) -> None:
     """Checks 1–3: tables, duplicate handling, empty pending queue."""
-    from src.database import Base, get_next_pending, init_db, load_products
+    from src.db import session as db_session
+    from src.database import get_next_pending, init_db, load_products
 
     init_db(db_path)
-    engine = None
-    import src.database as db_module
-
-    engine = db_module._engine
+    engine = db_session._engine
     tables = set(inspect(engine).get_table_names())
     check(
         "Database creates products, matches, decisions tables",
@@ -216,7 +202,7 @@ def test_no_circular_imports() -> None:
     check("No circular imports across core modules", ok)
 
 
-def test_api_endpoints(client: TestClient) -> int | None:
+def _run_api_endpoint_checks(client: TestClient) -> int | None:
     """Checks 5–6, 8–9: schemas, CORS, startup matcher, batch triage, all routes."""
     import api.main as main
     from api.schemas import (
@@ -365,31 +351,22 @@ def test_api_endpoints(client: TestClient) -> int | None:
     return pending_match_id
 
 
-def main() -> int:
-    """Run all checks and return process exit code."""
+def test_api_integration() -> None:
+    """Run layer checks and full API endpoint suite against a temp database."""
     db_path = tempfile.mktemp(suffix=".db")
     os.environ["TRENDBOX_DB_PATH"] = db_path
-    os.environ["TRENDBOX_MATCHER_INDEX"] = str(ROOT / "nonexistent_matcher_index_for_tests")
+    os.environ["TRENDBOX_MATCHER_INDEX"] = str(
+        Path(__file__).resolve().parents[1] / "nonexistent_matcher_index_for_tests"
+    )
 
-    print("=== Layer checks (database, matcher, imports) ===\n")
-    test_database_layer(db_path)
+    _assert_database_layer(db_path)
     test_matcher_format()
     test_no_circular_imports()
 
-    print("\n=== API endpoint checks ===\n")
     _seed_products(db_path)
 
     import api.main as main
 
     with TestClient(main.app) as client:
         main.matcher = FakeMatcher()
-        test_api_endpoints(client)
-
-    passed = sum(RESULTS)
-    total = len(RESULTS)
-    print(f"\n=== Summary: {passed}/{total} passed ===")
-    return 0 if passed == total else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+        _run_api_endpoint_checks(client)

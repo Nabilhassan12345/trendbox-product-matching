@@ -14,6 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from ui.api_client import api_get
+from ui.utils.charts import base_layout, chart_pipeline_method_split
 from ui.utils.tables import format_timestamp
 from ui.utils.styles import (
     badge_html,
@@ -55,40 +56,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Plotly base layout ────────────────────────────────────────────────────────
-
-def _base_layout(height: int = 160, show_legend: bool = False) -> dict:
-    return dict(
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        margin=dict(l=0, r=0, t=8, b=0),
-        showlegend=show_legend,
-        # Smooth 500ms entrance animation
-        transition=dict(duration=500, easing="cubic-in-out"),
-        # Dark tooltip matching design system
-        hoverlabel=dict(
-            bgcolor="#111827",
-            font_size=12,
-            font_color="white",
-            bordercolor="#111827",
-        ),
-        font=dict(
-            family='-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-            size=11,
-            color="#6B7280",
-        ),
-        xaxis=dict(showgrid=False, showline=False, tickfont=dict(size=10)),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor="#F3F4F6",
-            gridwidth=1,
-            showline=False,
-            tickfont=dict(size=10),
-        ),
-        height=height,
-    )
-
-
 # ── Timeline filtering ────────────────────────────────────────────────────────
 
 def _range_cutoff(range_key: str) -> datetime:
@@ -122,30 +89,6 @@ def _filter_daily_outcomes(daily: list[dict], range_key: str) -> list[dict]:
     return filtered
 
 
-def _chart_pipeline_method_split(pipeline_stats: dict) -> go.Figure:
-    """Bar chart of rank-1 resolution methods from live database counts."""
-    labels = ["Stage 0 · Exact", "Stage 0 · Fuzzy", "ML"]
-    values = [
-        int(pipeline_stats.get("stage0_exact", 0)),
-        int(pipeline_stats.get("stage0_fuzzy", 0)),
-        int(pipeline_stats.get("ml_resolved", 0)),
-    ]
-    colors = ["#10B981", "#34D399", "#3B82F6"]
-    fig = go.Figure(
-        go.Bar(
-            x=labels,
-            y=values,
-            marker_color=colors,
-            marker_line_width=0,
-            hovertemplate="%{x}: %{y:,}<extra></extra>",
-        )
-    )
-    layout = _base_layout(height=180)
-    layout["yaxis"]["showgrid"] = True
-    fig.update_layout(**layout)
-    return fig
-
-
 def _chart_confidence_buckets(buckets: dict[str, int]) -> go.Figure:
     """Horizontal bar chart for high / medium / low confidence bands."""
     labels = ["High (≥90%)", "Medium (60–90%)", "Low (<60%)"]
@@ -165,7 +108,7 @@ def _chart_confidence_buckets(buckets: dict[str, int]) -> go.Figure:
             hovertemplate="%{y}: %{x:,}<extra></extra>",
         )
     )
-    layout = _base_layout(height=140)
+    layout = base_layout(height=140)
     layout["xaxis"]["showgrid"] = True
     layout["yaxis"]["showgrid"] = False
     fig.update_layout(**layout)
@@ -193,7 +136,7 @@ def _chart_cumulative_line(daily: list[dict]) -> go.Figure:
                 hovertemplate="%{x|%b %d, %Y}<br>%{y:,} matched<extra></extra>",
             )
         )
-    layout = _base_layout()
+    layout = base_layout()
     layout["xaxis"]["tickformat"] = "%b %d"
     layout["xaxis"]["nticks"] = max(len(daily), 2)
     fig.update_layout(**layout)
@@ -215,7 +158,7 @@ def _chart_daily_auto_approved_bar(daily: list[dict]) -> go.Figure:
                 hovertemplate="%{x}<br>Auto-approved: %{y:,}<extra></extra>",
             )
         )
-    layout = _base_layout()
+    layout = base_layout()
     fig.update_layout(**layout)
     return fig
 
@@ -235,7 +178,7 @@ def _chart_daily_operator_bar(daily: list[dict]) -> go.Figure:
                 hovertemplate="%{x}<br>Operator approved: %{y:,}<extra></extra>",
             )
         )
-    layout = _base_layout()
+    layout = base_layout()
     fig.update_layout(**layout)
     return fig
 
@@ -295,7 +238,7 @@ def _chart_decisions_stacked(
         )
         fig.update_layout(barmode="group")
 
-    layout = _base_layout(show_legend=True)
+    layout = base_layout(show_legend=True)
     layout["legend"] = dict(
         orientation="h",
         yanchor="top",
@@ -691,7 +634,7 @@ def _render_dashboard() -> None:
         with st.container(border=True):
             section_label("RESOLUTION METHOD SPLIT (RANK-1)")
             st.plotly_chart(
-                _chart_pipeline_method_split(pipeline_stats),
+                chart_pipeline_method_split(pipeline_stats),
                 use_container_width=True,
                 config={"displayModeBar": False},
                 key="pipeline_method_split",

@@ -7,24 +7,8 @@ exit code 0 when all pass, 1 otherwise.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 from src.preprocess import extract_brand, extract_weight, normalize
-
-RESULTS: list[bool] = []
-
-
-def check(name: str, expected: object, actual: object) -> None:
-    """Record and print a single PASS/FAIL comparison."""
-    ok = expected == actual
-    status = "PASS" if ok else "FAIL"
-    detail = "" if ok else f"  (expected {expected!r}, got {actual!r})"
-    print(f"[{status}] {name}{detail}")
-    RESULTS.append(ok)
+from tests.helpers import check_eq as check
 
 
 def test_normalize() -> None:
@@ -83,18 +67,3 @@ def test_extract_brand() -> None:
     check("extract_brand normal", "ulker", extract_brand("ulker hanimeller 150 g"))
     check("extract_brand empty", "", extract_brand(""))
     check("extract_brand leading spaces", "nutella", extract_brand("  nutella 400 g"))
-
-
-def main() -> int:
-    test_normalize()
-    test_extract_weight()
-    test_extract_brand()
-
-    passed = sum(RESULTS)
-    total = len(RESULTS)
-    print(f"\n=== Summary: {passed}/{total} passed ===")
-    return 0 if passed == total else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

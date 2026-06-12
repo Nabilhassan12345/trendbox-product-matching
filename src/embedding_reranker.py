@@ -19,7 +19,7 @@ from src.preprocess import extract_brand, extract_weight
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-DEFAULT_EMBEDDINGS_PATH = "data/reference_embeddings.npy"
+DEFAULT_EMBEDDINGS_PATH = "data/matcher_index/reference_embeddings.npy"
 
 
 class EmbeddingReranker:

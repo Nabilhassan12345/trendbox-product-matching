@@ -13,6 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from ui.api_client import api_get
+from ui.utils.charts import base_layout, chart_pipeline_method_split
 from ui.utils.styles import (
     inject_styles,
     progress_bar_html,
@@ -56,50 +57,6 @@ st.markdown(
 )
 
 
-def _base_layout(height: int = 180, show_legend: bool = False) -> dict:
-    return dict(
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        margin=dict(l=0, r=0, t=8, b=0),
-        showlegend=show_legend,
-        transition=dict(duration=500, easing="cubic-in-out"),
-        hoverlabel=dict(
-            bgcolor="#111827",
-            font_size=12,
-            font_color="white",
-            bordercolor="#111827",
-        ),
-        font=dict(
-            family='-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-            size=11,
-            color="#6B7280",
-        ),
-        xaxis=dict(showgrid=False, showline=False, tickfont=dict(size=10)),
-        yaxis=dict(showgrid=True, gridcolor="#F3F4F6", showline=False, tickfont=dict(size=10)),
-    )
-
-
-def _chart_pipeline_method_split(pipeline_stats: dict) -> go.Figure:
-    labels = ["Stage 0 · Exact", "Stage 0 · Fuzzy", "ML"]
-    values = [
-        int(pipeline_stats.get("stage0_exact", 0)),
-        int(pipeline_stats.get("stage0_fuzzy", 0)),
-        int(pipeline_stats.get("ml_resolved", 0)),
-    ]
-    fig = go.Figure(
-        go.Bar(
-            x=labels,
-            y=values,
-            marker_color=["#10B981", "#34D399", "#3B82F6"],
-            marker_line_width=0,
-            hovertemplate="%{x}: %{y:,}<extra></extra>",
-        )
-    )
-    layout = _base_layout(height=200)
-    fig.update_layout(**layout)
-    return fig
-
-
 def _chart_triage_outcomes(pipeline_stats: dict) -> go.Figure:
     labels = ["Auto-approved", "Pending", "Auto-rejected"]
     values = [
@@ -116,7 +73,7 @@ def _chart_triage_outcomes(pipeline_stats: dict) -> go.Figure:
             hovertemplate="%{x}: %{y:,}<extra></extra>",
         )
     )
-    layout = _base_layout(height=200)
+    layout = base_layout(height=200)
     fig.update_layout(**layout)
     return fig
 
@@ -295,7 +252,7 @@ def _render_pipeline() -> None:
         with st.container(border=True):
             section_label("RESOLUTION METHOD (RANK-1)")
             st.plotly_chart(
-                _chart_pipeline_method_split(pipeline_stats),
+                chart_pipeline_method_split(pipeline_stats, height=200),
                 use_container_width=True,
                 config={"displayModeBar": False},
                 key="pipeline_method_chart",

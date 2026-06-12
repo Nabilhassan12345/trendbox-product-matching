@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run all pre-submission verification checks for trendbox-product-matching."""
+"""Run full verification: file checks, imports, data smoke test, pytest."""
 
 from __future__ import annotations
 
@@ -10,6 +10,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRED_FILES = (
+    "src/config.py",
+    "src/db/models.py",
+    "src/db/session.py",
+    "src/db/catalog.py",
+    "src/db/matches.py",
+    "src/db/analytics.py",
+    "src/index_builder.py",
+    "src/batch.py",
+    "src/blocking.py",
+    "src/reference_catalog.py",
+    "src/data_profile.py",
+    "src/match_metadata.py",
     "src/preprocess.py",
     "src/tfidf_retriever.py",
     "src/embedding_reranker.py",
@@ -18,12 +30,22 @@ REQUIRED_FILES = (
     "src/database.py",
     "api/main.py",
     "api/schemas.py",
+    "ui/app.py",
+    "ui/utils/theme.py",
+    "ui/utils/components.py",
+    "ui/utils/layout.py",
+    "ui/utils/charts.py",
     "ui/pages/01_Review.py",
     "ui/pages/02_Analytics.py",
+    "ui/pages/03_Pipeline.py",
+    "scripts/evaluate.py",
+    "scripts/profile_data.py",
+    "scripts/run_batch.py",
     "notebooks/01_exploration.ipynb",
     "notebooks/02_experiments.ipynb",
     "pipeline.py",
-    "tests/run_all_tests.py",
+    "pyproject.toml",
+    "tests/conftest.py",
     "tests/test_preprocess.py",
     "tests/test_matcher.py",
     "tests/test_api.py",
@@ -35,6 +57,9 @@ REQUIRED_FILES = (
 )
 
 IMPORT_MODULES = (
+    "src.config",
+    "src.db",
+    "src.batch",
     "src.preprocess",
     "src.tfidf_retriever",
     "src.embedding_reranker",
@@ -43,11 +68,12 @@ IMPORT_MODULES = (
     "src.database",
     "api.main",
     "api.schemas",
+    "ui.utils.styles",
+    "ui.utils.theme",
 )
 
 
 def check_files() -> bool:
-    """Verify required submission files exist and are non-empty."""
     print("=== Required files ===\n")
     ok = True
     for rel in REQUIRED_FILES:
@@ -62,7 +88,6 @@ def check_files() -> bool:
 
 
 def check_imports() -> bool:
-    """Verify core modules import without error."""
     print("\n=== Module imports ===\n")
     sys.path.insert(0, str(ROOT))
     ok = True
@@ -77,13 +102,13 @@ def check_imports() -> bool:
 
 
 def check_data_load() -> bool:
-    """Verify CSV loads with expected row counts."""
     print("\n=== Data load smoke test ===\n")
     sys.path.insert(0, str(ROOT))
     try:
+        from src.config import DATA_CSV
         from src.preprocess import load_and_clean
 
-        df_barcoded, df_unmatched = load_and_clean(str(ROOT / "data" / "mix_products.csv"))
+        df_barcoded, df_unmatched = load_and_clean(str(DATA_CSV))
         total = len(df_barcoded) + len(df_unmatched)
         checks = [
             ("total rows == 100,585", total == 100_585),
@@ -102,29 +127,17 @@ def check_data_load() -> bool:
         return False
 
 
-def _run_test_file(filename: str, header: str) -> bool:
-    """Run a standalone test file as a subprocess; pass on exit code 0."""
-    print(f"\n=== {header} ===\n")
+def run_pytest() -> bool:
+    print("\n=== Pytest suites ===\n")
     result = subprocess.run(
-        [sys.executable, str(ROOT / "tests" / filename)],
+        [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=short"],
         cwd=str(ROOT),
     )
     return result.returncode == 0
 
 
 def main() -> int:
-    """Run all checks and return a process exit code."""
-    results = [
-        check_files(),
-        check_imports(),
-        check_data_load(),
-        _run_test_file("test_preprocess.py", "Preprocessing unit tests"),
-        _run_test_file("test_match_metadata.py", "Match metadata unit tests"),
-        _run_test_file("test_blocking.py", "Stage 0 blocking tests"),
-        _run_test_file("test_product_kind.py", "Product kind tests"),
-        _run_test_file("test_matcher.py", "Matcher end-to-end tests"),
-        _run_test_file("test_api.py", "API integration tests"),
-    ]
+    results = [check_files(), check_imports(), check_data_load(), run_pytest()]
     passed = sum(results)
     total = len(results)
     print(f"\n=== Verification summary: {passed}/{total} suites passed ===")

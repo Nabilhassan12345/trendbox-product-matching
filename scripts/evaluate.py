@@ -34,16 +34,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.config import DATA_CSV, EMBEDDINGS_CACHE, LEGACY_EMBEDDING_PATHS
 from src.matcher import ProductMatcher
 from src.preprocess import load_and_clean
 
 logger = logging.getLogger(__name__)
 
-DATA_CSV = ROOT / "data" / "mix_products.csv"
-EMBED_CACHE_CANDIDATES = (
-    ROOT / "data" / "faiss_cache" / "reference_embeddings.npy",
-    ROOT / "data" / "reference_embeddings.npy",
-)
+EMBED_CACHE_CANDIDATES = (EMBEDDINGS_CACHE, *LEGACY_EMBEDDING_PATHS)
 
 
 def build_ground_truth(

@@ -11,10 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.config import CATALOG_PROFILE_PATH, DATA_CSV
 from src.data_profile import format_profile_summary, profile_catalog, save_profile_report
 
-DEFAULT_CSV = ROOT / "data" / "mix_products.csv"
-DEFAULT_OUT = ROOT / "data" / "reports" / "catalog_profile.json"
+DEFAULT_CSV = DATA_CSV
+DEFAULT_OUT = CATALOG_PROFILE_PATH
 
 
 def main() -> None:

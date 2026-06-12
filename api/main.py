@@ -33,9 +33,9 @@ from api.schemas import (
     ReopenResponse,
     StatsResponse,
 )
-from src.batch import process_unmatched
-from src.blocking import Stage0Resolver
-from src.confidence import get_confidence_color
+from src.batch import run_full_batch
+from src.confidence import HIGH_THRESHOLD, MEDIUM_THRESHOLD, get_confidence_color
+from src.config import CATALOG_PROFILE_PATH, ROOT, TOP_SUGGESTIONS
 from src.database import (
     OPEN_STATUSES,
     STATUS_APPROVED,
@@ -57,7 +57,6 @@ from src.database import (
     init_db,
     reopen_auto_rejected,
     save_decision,
-    replace_matches,
 )
 from src.match_metadata import explanation_from_stored, infer_match_source
 from src.matcher import ProductMatcher
@@ -69,17 +68,17 @@ logger = logging.getLogger(__name__)
 # overrides values already set in the environment, e.g. by pipeline.py or tests).
 load_dotenv()
 
-DB_PATH = os.getenv("TRENDBOX_DB_PATH", "data/matching.db")
-MATCHER_INDEX_PATH = os.getenv("TRENDBOX_MATCHER_INDEX", "data/matcher_index")
-CATALOG_PROFILE_PATH = Path(
-    os.getenv(
-        "TRENDBOX_CATALOG_PROFILE",
-        "data/reports/catalog_profile.json",
-    )
-)
-TOP_SUGGESTIONS = 3
-
 matcher: ProductMatcher | None = None
+
+
+def _runtime_db_path() -> str:
+    """Resolve DB path at startup so tests and subprocesses can override via env."""
+    return os.getenv("TRENDBOX_DB_PATH", str(ROOT / "data" / "matching.db"))
+
+
+def _runtime_matcher_index() -> Path:
+    raw = os.getenv("TRENDBOX_MATCHER_INDEX")
+    return Path(raw) if raw else ROOT / "data" / "matcher_index"
 
 
 @asynccontextmanager
@@ -92,17 +91,20 @@ async def lifespan(_app: FastAPI):
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    init_db(DB_PATH)
-    logger.info("Database initialised at %s", DB_PATH)
+    db_path = _runtime_db_path()
+    matcher_index = _runtime_matcher_index()
+
+    init_db(db_path)
+    logger.info("Database initialised at %s", db_path)
 
     matcher = ProductMatcher()
-    if os.path.isdir(MATCHER_INDEX_PATH):
-        matcher.load(MATCHER_INDEX_PATH)
-        logger.info("Matcher loaded from %s", MATCHER_INDEX_PATH)
+    if matcher_index.is_dir():
+        matcher.load(str(matcher_index))
+        logger.info("Matcher loaded from %s", matcher_index)
     else:
         logger.warning(
             "Matcher index not found at %s — run matcher.build() and save before matching",
-            MATCHER_INDEX_PATH,
+            matcher_index,
         )
 
     yield
@@ -308,9 +310,9 @@ def _pending_review_count() -> int:
 
 def _confidence_buckets(scores: list[float]) -> ConfidenceBuckets:
     """Tally rank-1 confidence scores into triage bands."""
-    high = sum(1 for score in scores if score >= 0.90)
-    medium = sum(1 for score in scores if 0.60 <= score < 0.90)
-    low = sum(1 for score in scores if score < 0.60)
+    high = sum(1 for score in scores if score >= HIGH_THRESHOLD)
+    medium = sum(1 for score in scores if MEDIUM_THRESHOLD <= score < HIGH_THRESHOLD)
+    low = sum(1 for score in scores if score < MEDIUM_THRESHOLD)
     return ConfidenceBuckets(high=high, medium=medium, low=low)
 
 
@@ -506,37 +508,11 @@ def batch_process() -> BatchProcessResponse:
     """Run matching for all unmatched products and auto-triage by confidence."""
     active_matcher = _require_matcher()
 
-    with get_session() as session:
-        unmatched_products = [
-            (product.id, product.name)
-            for product in session.query(Product)
-            .filter(Product.has_barcode.is_(False))
-            .order_by(Product.id)
-            .all()
-        ]
-        barcode_rows = (
-            session.query(Product.id, Product.barcode)
-            .filter(Product.has_barcode.is_(True), Product.barcode.isnot(None))
-            .order_by(Product.id)
-            .all()
-        )
-        barcode_to_id: dict[str, int] = {}
-        for product_id, barcode in barcode_rows:
-            if barcode not in barcode_to_id:
-                barcode_to_id[barcode] = product_id
+    try:
+        records, counts = run_full_batch(active_matcher)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    stage0 = None
-    ref_df = active_matcher.tfidf.reference_df
-    if ref_df is not None and not ref_df.empty:
-        stage0 = Stage0Resolver(ref_df)
-
-    records, counts = process_unmatched(
-        active_matcher,
-        unmatched_products,
-        barcode_to_id,
-        stage0=stage0,
-    )
-    replace_matches(records)
     logger.info(
         "Batch process complete: %s suggestions (%s stage-0, %s auto-approved, "
         "%s auto-rejected, %s pending)",

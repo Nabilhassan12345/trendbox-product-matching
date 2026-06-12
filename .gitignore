@@ -15,9 +15,13 @@ venv/
 .vscode/
 *.swp
 
+# Generated reports (regenerate with scripts/profile_data.py and scripts/evaluate.py)
+data/reports/evaluation_summary.json
+
 # Local databases and generated indexes (rebuild with pipeline)
 data/matching.db
 data/matcher_index/
+# Legacy cache dirs (pre-consolidation; safe to delete locally)
 data/tfidf_cache/
 data/faiss_cache/
 data/reference_embeddings.npy

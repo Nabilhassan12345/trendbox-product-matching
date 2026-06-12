@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import socket
 import subprocess
 import sys
@@ -20,50 +19,25 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.batch import process_unmatched
-from src.blocking import Stage0Resolver
-from src.database import Product, get_session, init_db, load_products, replace_matches
+from src.config import (
+    API_PORT,
+    DATA_CSV,
+    REQUIRED_PATHS,
+    UI_APP,
+    UI_PORT,
+    apply_runtime_env,
+)
+
+from src.batch import run_full_batch
+from src.config import DB_PATH
+from src.database import init_db, load_products
+from src.index_builder import build_or_load_faiss, build_or_load_tfidf
 from src.matcher import ProductMatcher
 from src.preprocess import load_and_clean
 from src.reference_catalog import (
     canonical_barcoded,
     canonical_unmatched,
     prepare_reference_index,
-)
-
-# ── Paths ────────────────────────────────────────────────────────────────────
-DATA_CSV = ROOT / "data" / "mix_products.csv"
-DB_PATH = ROOT / "data" / "matching.db"
-TFIDF_CACHE_DIR = ROOT / "data" / "tfidf_cache"
-FAISS_CACHE_DIR = ROOT / "data" / "faiss_cache"
-TFIDF_CACHE_FILE = TFIDF_CACHE_DIR / "tfidf.joblib"
-FAISS_INDEX_BASE = FAISS_CACHE_DIR / "embedding_index"
-EMBEDDINGS_CACHE = FAISS_CACHE_DIR / "reference_embeddings.npy"
-MATCHER_INDEX_DIR = ROOT / "data" / "matcher_index"
-UI_APP = ROOT / "ui" / "app.py"
-
-API_PORT = 8000
-UI_PORT = 8501
-TOP_SUGGESTIONS = 3
-
-REQUIRED_PATHS = (
-    DATA_CSV,
-    ROOT / "api" / "main.py",
-    ROOT / "api" / "schemas.py",
-    ROOT / "src" / "preprocess.py",
-    ROOT / "src" / "tfidf_retriever.py",
-    ROOT / "src" / "embedding_reranker.py",
-    ROOT / "src" / "confidence.py",
-    ROOT / "src" / "matcher.py",
-    ROOT / "src" / "database.py",
-    ROOT / "ui" / "pages" / "01_Review.py",
-    ROOT / "ui" / "pages" / "02_Analytics.py",
-    ROOT / "notebooks" / "01_exploration.ipynb",
-    ROOT / "notebooks" / "02_experiments.ipynb",
-    ROOT / "tests" / "run_all_tests.py",
-    ROOT / "tests" / "test_api.py",
-    UI_APP,
-    ROOT / "requirements.txt",
 )
 
 BANNER = """\
@@ -138,8 +112,7 @@ def _prepare_catalog(
 
 def _init_database(df_barcoded: Any, df_unmatched: Any) -> dict[str, int]:
     start = _step("Step 4 — Initializing database")
-    os.environ["TRENDBOX_DB_PATH"] = str(DB_PATH)
-    os.environ["TRENDBOX_MATCHER_INDEX"] = str(MATCHER_INDEX_DIR)
+    apply_runtime_env()
 
     try:
         init_db(str(DB_PATH))
@@ -151,119 +124,24 @@ def _init_database(df_barcoded: Any, df_unmatched: Any) -> dict[str, int]:
     return counts
 
 
-def _faiss_cache_ready() -> bool:
-    return FAISS_INDEX_BASE.with_suffix(".faiss").exists() and Path(
-        f"{FAISS_INDEX_BASE}_meta.joblib"
-    ).exists()
-
-
-def _build_or_load_tfidf(matcher: ProductMatcher, df_barcoded: Any, rebuild: bool) -> None:
-    start = _step("Step 5 — TF-IDF index")
-    TFIDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not rebuild and TFIDF_CACHE_FILE.exists():
-        try:
-            matcher.tfidf.load(str(TFIDF_CACHE_FILE))
-            _done(start, "Loaded TF-IDF from cache")
-            return
-        except Exception as exc:
-            print(f"  ⚠ Cache load failed ({exc}) — rebuilding…")
-
-    try:
-        build_start = time.perf_counter()
-        matcher.tfidf.fit(df_barcoded)
-        matcher.tfidf.save(str(TFIDF_CACHE_FILE))
-        elapsed = time.perf_counter() - build_start
-        print(f"  ✓ Built TF-IDF index in {elapsed:.1f}s")
-    except Exception as exc:
-        _fail(f"TF-IDF build failed: {exc}", "Check that barcoded products have valid name_clean values.")
-
-
-def _build_or_load_faiss(matcher: ProductMatcher, df_barcoded: Any, rebuild: bool) -> None:
-    start = _step("Step 6 — FAISS embedding index")
-    FAISS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not rebuild and _faiss_cache_ready():
-        try:
-            matcher.embedder.load_index(str(FAISS_INDEX_BASE))
-            matcher._built = True
-            _done(start, "Loaded FAISS from cache")
-            _sync_matcher_index(matcher)
-            return
-        except Exception as exc:
-            print(f"  ⚠ Cache load failed ({exc}) — rebuilding…")
-
-    try:
-        build_start = time.perf_counter()
-        matcher.embedder.build_faiss_index(df_barcoded, embeddings_path=str(EMBEDDINGS_CACHE))
-        matcher.embedder.save_index(str(FAISS_INDEX_BASE))
-        matcher._built = True
-        elapsed = time.perf_counter() - build_start
-        print(f"  ✓ Built FAISS index in {elapsed:.1f}s")
-        _sync_matcher_index(matcher)
-    except Exception as exc:
-        _fail(
-            f"FAISS build failed: {exc}",
-            "Ensure sentence-transformers and faiss-cpu are installed; first run downloads the model.",
-        )
-
-
-def _sync_matcher_index(matcher: ProductMatcher) -> None:
-    """Write a unified index snapshot for the FastAPI startup loader."""
-    MATCHER_INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    matcher.save(str(MATCHER_INDEX_DIR))
-
-
 def _run_batch_processing(matcher: ProductMatcher, df_index: Any) -> dict[str, int]:
     start = _step("Step 7 — Batch processing (match + triage)")
-    if not matcher._built:
-        _fail("Matcher is not built — cannot run batch processing.")
-
-    with get_session() as session:
-        unmatched_products = [
-            (product.id, product.name)
-            for product in session.query(Product)
-            .filter(Product.has_barcode.is_(False))
-            .order_by(Product.id)
-            .all()
-        ]
-        barcode_rows = (
-            session.query(Product.id, Product.barcode)
-            .filter(Product.has_barcode.is_(True), Product.barcode.isnot(None))
-            .order_by(Product.id)
-            .all()
+    try:
+        print("  Matching unmatched products (this may take a while)…")
+        batch_start = time.perf_counter()
+        _records, counts = run_full_batch(matcher, stage0_df=df_index)
+        elapsed = time.perf_counter() - batch_start
+        print(
+            f"  ✓ Batch complete in {elapsed:.1f}s — "
+            f"{counts['stage0_resolved']:,} stage-0, "
+            f"{counts['auto_approved']:,} auto-approved, "
+            f"{counts['pending']:,} pending, "
+            f"{counts['auto_rejected']:,} auto-rejected"
         )
-        barcode_to_id: dict[str, int] = {}
-        for product_id, barcode in barcode_rows:
-            if barcode not in barcode_to_id:
-                barcode_to_id[barcode] = product_id
-
-    total = len(unmatched_products)
-    if total == 0:
-        _fail("No unmatched products in database.", "Check data/mix_products.csv has rows without barcodes.")
-
-    print(f"  Matching {total:,} unmatched products (this may take a while)…")
-    batch_start = time.perf_counter()
-
-    stage0 = Stage0Resolver(df_index)
-    records, counts = process_unmatched(
-        matcher,
-        unmatched_products,
-        barcode_to_id,
-        stage0=stage0,
-    )
-
-    replace_matches(records)
-    elapsed = time.perf_counter() - batch_start
-    print(
-        f"  ✓ Batch complete in {elapsed:.1f}s — "
-        f"{counts['stage0_resolved']:,} stage-0, "
-        f"{counts['auto_approved']:,} auto-approved, "
-        f"{counts['pending']:,} pending, "
-        f"{counts['auto_rejected']:,} auto-rejected"
-    )
-    _done(start, f"{len(records):,} suggestions saved")
-    return counts
+        _done(start, f"{counts['auto_approved'] + counts['pending'] + counts['auto_rejected']:,} products triaged")
+        return counts
+    except RuntimeError as exc:
+        _fail(str(exc))
 
 
 def _print_summary(products_loaded: int, counts: dict[str, int]) -> None:
@@ -303,7 +181,6 @@ def _start_api_background() -> None:
     thread = threading.Thread(target=_run, name="fastapi-server", daemon=True)
     thread.start()
 
-    # Wait until health endpoint responds (max 30s).
     import requests
 
     for _ in range(30):
@@ -348,6 +225,8 @@ def _start_streamlit() -> None:
     print(f"\n  UI → http://localhost:{UI_PORT}")
     print(f"  API → http://localhost:{API_PORT}/docs\n")
 
+    import os
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
 
@@ -388,7 +267,6 @@ def main() -> None:
     args = parse_args()
     _configure_logging()
 
-    # Load optional overrides from .env (does not override pre-set env vars).
     try:
         from dotenv import load_dotenv
 
@@ -411,8 +289,22 @@ def main() -> None:
     products_loaded = db_counts["barcoded"] + db_counts["unmatched"]
 
     matcher = ProductMatcher()
-    _build_or_load_tfidf(matcher, df_index, rebuild=args.rebuild)
-    _build_or_load_faiss(matcher, df_index, rebuild=args.rebuild)
+    tfidf_start = _step("Step 5 — TF-IDF index")
+    try:
+        tfidf_msg = build_or_load_tfidf(matcher, df_index, rebuild=args.rebuild)
+        _done(tfidf_start, tfidf_msg)
+    except Exception as exc:
+        _fail(f"TF-IDF build failed: {exc}", "Check that barcoded products have valid name_clean values.")
+
+    faiss_start = _step("Step 6 — FAISS embedding index")
+    try:
+        faiss_msg = build_or_load_faiss(matcher, df_index, rebuild=args.rebuild)
+        _done(faiss_start, faiss_msg)
+    except Exception as exc:
+        _fail(
+            f"FAISS build failed: {exc}",
+            "Ensure sentence-transformers and faiss-cpu are installed; first run downloads the model.",
+        )
 
     if args.skip_batch:
         counts = {"auto_approved": 0, "auto_rejected": 0, "pending": 0}

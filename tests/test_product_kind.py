@@ -3,24 +3,10 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 from src.confidence import compute_confidence, resolve_brand_match, triage
 from src.preprocess import classify_product_kind, normalize
 
-RESULTS: list[bool] = []
-
-
-def check(name: str, expected: object, actual: object) -> None:
-    ok = expected == actual
-    status = "PASS" if ok else "FAIL"
-    detail = "" if ok else f"  (expected {expected!r}, got {actual!r})"
-    print(f"[{status}] {name}{detail}")
-    RESULTS.append(ok)
+from tests.helpers import check_eq as check
 
 
 def test_classify_product_kind() -> None:
@@ -74,18 +60,3 @@ def test_maydonoz_confidence() -> None:
     )
     check("score enters review band", "review", triage(score))
     check("score above 0.60", True, score >= 0.60)
-
-
-def main() -> int:
-    test_classify_product_kind()
-    test_resolve_brand_match_fresh()
-    test_maydonoz_confidence()
-
-    passed = sum(RESULTS)
-    total = len(RESULTS)
-    print(f"\n=== Summary: {passed}/{total} passed ===")
-    return 0 if passed == total else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
