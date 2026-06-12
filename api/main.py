@@ -24,20 +24,28 @@ from api.schemas import (
     MatchResponse,
     MatchSuggestion,
     RecentDecisionRow,
+    DailyOutcomePoint,
+    RecentMatchRow,
     StatsResponse,
-    TimelinePoint,
 )
 from src.batch import process_unmatched
+from src.blocking import Stage0Resolver
 from src.confidence import get_confidence_color
 from src.database import (
     OPEN_STATUSES,
+    STATUS_APPROVED,
+    STATUS_AUTO_APPROVED,
+    STATUS_AUTO_REJECTED,
     STATUS_PENDING,
+    STATUS_REJECTED,
     Decision,
     Match,
     Product,
-    get_approval_timeline,
     get_confidence_scores,
+    get_daily_outcome_counts,
+    get_recent_activity,
     get_recent_decisions,
+    get_recent_matches_by_outcome,
     get_session,
     get_stats,
     init_db,
@@ -254,20 +262,47 @@ def _confidence_buckets(scores: list[float]) -> ConfidenceBuckets:
     return ConfidenceBuckets(high=high, medium=medium, low=low)
 
 
+def _match_source(status: str) -> str:
+    """Classify a match status as auto- or operator-driven."""
+    if status in {STATUS_AUTO_APPROVED, STATUS_AUTO_REJECTED}:
+        return "auto"
+    if status in {STATUS_APPROVED, STATUS_REJECTED}:
+        return "operator"
+    return "auto"
+
+
 def _build_recent_decision_rows(limit: int = 20) -> list[RecentDecisionRow]:
-    """Flatten recent operator decisions for the analytics table."""
-    rows: list[RecentDecisionRow] = []
-    for item in get_recent_decisions(limit):
-        match = item.get("match") or {}
-        unmatched = match.get("unmatched_product") or {}
-        suggested = match.get("suggested_product") or {}
+    """Flatten recent auto-triage and operator activity for the analytics table."""
+    return [
+        RecentDecisionRow(
+            product_name=str(item.get("product_name", "—")),
+            matched_to=str(item.get("matched_to", "—")),
+            confidence=float(item.get("confidence", 0.0)),
+            decision=str(item.get("decision", "")),
+            time=str(item.get("time", "")),
+            source=str(item.get("source", "operator")),
+        )
+        for item in get_recent_activity(limit)
+    ]
+
+
+def _build_recent_match_rows(outcome: str, limit: int = 50) -> list[RecentMatchRow]:
+    """Flatten recent resolved matches for the review history tabs."""
+    rows: list[RecentMatchRow] = []
+    for item in get_recent_matches_by_outcome(outcome, limit=limit):
+        unmatched = item.get("unmatched_product") or {}
+        suggested = item.get("suggested_product") or {}
+        status = str(item.get("status", ""))
         rows.append(
-            RecentDecisionRow(
+            RecentMatchRow(
                 product_name=str(unmatched.get("name", "—")),
                 matched_to=str(suggested.get("name", "—")),
-                confidence=float(match.get("confidence_score", 0.0)),
-                decision=str(item.get("decision", "")),
-                time=str(item.get("decided_at", "")),
+                barcode=str(suggested.get("barcode") or ""),
+                confidence=float(item.get("confidence_score", 0.0)),
+                confidence_label=str(item.get("confidence_label", "")),
+                status=status,
+                source=_match_source(status),
+                time=str(item.get("event_time") or item.get("created_at", "")),
             )
         )
     return rows
@@ -280,15 +315,15 @@ def _build_analytics_response() -> AnalyticsResponse:
     status_counts = raw.get("matches_by_status", {})
     auto_rejected = int(status_counts.get("auto_rejected", 0))
     scores = get_confidence_scores(rank=1)
-    timeline = [TimelinePoint(**point) for point in get_approval_timeline()]
+    daily_outcomes = [DailyOutcomePoint(**row) for row in get_daily_outcome_counts()]
 
     return AnalyticsResponse(
         stats=stats,
-        catalog_total=100_585,
+        catalog_total=int(raw["products_total"]),
         auto_rejected=auto_rejected,
         confidence_scores=scores,
         confidence_buckets=_confidence_buckets(scores),
-        timeline=timeline,
+        daily_outcomes=daily_outcomes,
         recent_decisions=_build_recent_decision_rows(20),
     )
 
@@ -351,6 +386,19 @@ def analytics() -> AnalyticsResponse:
     return _build_analytics_response()
 
 
+@app.get("/matches/recent", response_model=list[RecentMatchRow])
+def matches_recent(outcome: str = "approved", limit: int = 50) -> list[RecentMatchRow]:
+    """Return recent rank-1 matches for a review outcome band."""
+    outcome = outcome.lower().strip()
+    if outcome not in {"approved", "rejected", "pending"}:
+        raise HTTPException(status_code=422, detail="outcome must be approved, rejected, or pending")
+    limit = max(1, min(limit, 200))
+    try:
+        return _build_recent_match_rows(outcome, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post("/batch_process", response_model=BatchProcessResponse)
 def batch_process() -> BatchProcessResponse:
     """Run matching for all unmatched products and auto-triage by confidence."""
@@ -375,11 +423,23 @@ def batch_process() -> BatchProcessResponse:
             if barcode not in barcode_to_id:
                 barcode_to_id[barcode] = product_id
 
-    records, counts = process_unmatched(active_matcher, unmatched_products, barcode_to_id)
+    stage0 = None
+    ref_df = active_matcher.tfidf.reference_df
+    if ref_df is not None and not ref_df.empty:
+        stage0 = Stage0Resolver(ref_df)
+
+    records, counts = process_unmatched(
+        active_matcher,
+        unmatched_products,
+        barcode_to_id,
+        stage0=stage0,
+    )
     replace_matches(records)
     logger.info(
-        "Batch process complete: %s suggestions (%s auto-approved, %s auto-rejected, %s pending)",
+        "Batch process complete: %s suggestions (%s stage-0, %s auto-approved, "
+        "%s auto-rejected, %s pending)",
         len(records),
+        counts.get("stage0_resolved", 0),
         counts["auto_approved"],
         counts["auto_rejected"],
         counts["pending"],

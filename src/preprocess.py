@@ -38,6 +38,11 @@ _UNIT_PATTERN = re.compile(
 _NON_ALNUM_SPACE = re.compile(r"[^a-z0-9\s]")
 _MULTI_SPACE = re.compile(r"\s+")
 
+# Pack/count tokens common on fresh produce (not FMCG pack sizes).
+_FRESH_COUNT_TOKENS = frozenset({"adet", "demet", "paket", "buketi", "demeti"})
+
+ProductKind = str  # "branded" | "fresh" | "unknown"
+
 
 def _canonical_unit(unit: str) -> str:
     """Map a raw unit token to its canonical short form."""
@@ -127,6 +132,36 @@ def extract_brand(name: str) -> str:
     return parts[0] if parts else ""
 
 
+def classify_product_kind(
+    name_clean: str,
+    brand: str = "",
+    weight: str = "",
+) -> ProductKind:
+    """Classify a product as branded FMCG, fresh produce, or unknown.
+
+    Fresh produce is detected from count tokens (``adet``, ``demet``, ``paket``)
+    without a parsed pack weight — the first word is usually the item name, not
+    a manufacturer brand.
+    """
+    if not name_clean or not isinstance(name_clean, str):
+        return "unknown"
+
+    parts = name_clean.strip().split()
+    if not parts:
+        return "unknown"
+
+    if parts[-1] in _FRESH_COUNT_TOKENS and not weight:
+        return "fresh"
+
+    if weight:
+        return "branded"
+
+    if len(parts) >= 3:
+        return "branded"
+
+    return "unknown"
+
+
 def extract_weight(name: str) -> str:
     """Extract a weight/volume phrase such as ``'400 g'`` or ``'1 kg'``.
 
@@ -172,6 +207,14 @@ def enrich_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     enriched = df.copy()
     enriched["brand"] = enriched[source_col].apply(extract_brand)
     enriched["weight"] = enriched[source_col].apply(extract_weight)
+    enriched["product_kind"] = enriched.apply(
+        lambda row: classify_product_kind(
+            str(row[source_col]),
+            str(row.get("brand", "") or ""),
+            str(row.get("weight", "") or ""),
+        ),
+        axis=1,
+    )
     return enriched
 
 

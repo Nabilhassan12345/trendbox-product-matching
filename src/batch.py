@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.confidence import triage
+from src.preprocess import normalize, normalize_batch
 from src.database import (
     STATUS_ALTERNATIVE,
     STATUS_AUTO_APPROVED,
@@ -98,6 +99,7 @@ def process_unmatched(
     unmatched_products: Sequence[Tuple[int, str]],
     barcode_to_id: Dict[str, int],
     *,
+    stage0: Optional[Any] = None,
     progress_every: int = 500,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Match every unmatched product and triage each one at the product level.
@@ -106,6 +108,7 @@ def process_unmatched(
         matcher: A built :class:`ProductMatcher`.
         unmatched_products: Iterable of ``(product_id, product_name)``.
         barcode_to_id: Map from reference barcode to its product id.
+        stage0: Optional :class:`Stage0Resolver` for deterministic pre-ML matching.
         progress_every: Log progress every N products (0 to disable).
 
     Returns:
@@ -113,18 +116,44 @@ def process_unmatched(
         outcome: ``auto_approved``, ``auto_rejected``, ``pending``.
     """
     records: List[Dict[str, Any]] = []
-    counts = {"auto_approved": 0, "auto_rejected": 0, "pending": 0}
+    counts = {
+        "auto_approved": 0,
+        "auto_rejected": 0,
+        "pending": 0,
+        "stage0_resolved": 0,
+    }
 
     total = len(unmatched_products)
     start = time.perf_counter()
 
-    # Batched matching: encode all queries in chunks (one transformer pass per
-    # chunk) instead of one forward pass per product. Orders of magnitude faster
-    # on CPU than calling matcher.match() in a loop.
     names = [product_name for _, product_name in unmatched_products]
-    per_product_hits = matcher.match_many(names)
+    queries = normalize_batch(names)
+    all_hits: List[Optional[List[Dict[str, Any]]]] = [None] * total
+    unresolved_indices: List[int] = []
 
-    for (product_id, _), hits in zip(unmatched_products, per_product_hits):
+    if stage0 is not None:
+        stage0_results = stage0.resolve_many(queries)
+        for index, hits in enumerate(stage0_results):
+            if hits:
+                all_hits[index] = hits
+                counts["stage0_resolved"] += 1
+            else:
+                unresolved_indices.append(index)
+    else:
+        unresolved_indices = list(range(total))
+
+    if unresolved_indices:
+        unresolved_queries = [queries[index] for index in unresolved_indices]
+        ml_results = matcher.match_many(
+            [names[index] for index in unresolved_indices],
+            queries=unresolved_queries,
+        )
+        for index, hits in zip(unresolved_indices, ml_results):
+            all_hits[index] = hits
+
+    for (product_id, _), hits in zip(unmatched_products, all_hits):
+        if not hits:
+            continue
         product_records, status = build_records_for_product(
             hits, product_id, barcode_to_id
         )
@@ -139,7 +168,11 @@ def process_unmatched(
     elapsed = time.perf_counter() - start
     rate = total / elapsed if elapsed else 0.0
     logger.info(
-        "Triaged %s products in %.1fs (%.1f/s)", f"{total:,}", elapsed, rate
+        "Triaged %s products in %.1fs (%.1f/s); stage0 resolved %s",
+        f"{total:,}",
+        elapsed,
+        rate,
+        f"{counts['stage0_resolved']:,}",
     )
 
     return records, counts

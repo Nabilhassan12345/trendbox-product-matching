@@ -16,7 +16,7 @@ from src.confidence import (
     triage,
 )
 from src.embedding_reranker import DEFAULT_EMBEDDINGS_PATH, EmbeddingReranker
-from src.preprocess import extract_brand, extract_weight, normalize
+from src.preprocess import classify_product_kind, extract_brand, extract_weight, normalize
 from src.tfidf_retriever import TFIDFRetriever
 
 logger = logging.getLogger(__name__)
@@ -158,12 +158,15 @@ class ProductMatcher:
         """
         query_brand = extract_brand(query)
         query_weight = extract_weight(query)
+        query_kind = classify_product_kind(query, query_brand, query_weight)
 
         ranked: List[Dict[str, Any]] = []
         for position, row in enumerate(candidates.itertuples(index=False)):
             candidate_clean = row.name_clean if hasattr(row, "name_clean") else normalize(row.name)
-            brand_match = _match_state(query_brand, extract_brand(candidate_clean))
-            weight_match = _match_state(query_weight, extract_weight(candidate_clean))
+            candidate_brand = extract_brand(candidate_clean)
+            candidate_weight = extract_weight(candidate_clean)
+            brand_match = _match_state(query_brand, candidate_brand)
+            weight_match = _match_state(query_weight, candidate_weight)
 
             tfidf_score = float(row.tfidf_score)
             embedding_score = float(embedding_scores[position])
@@ -172,6 +175,9 @@ class ProductMatcher:
                 embedding_score=embedding_score,
                 brand_match=brand_match,
                 weight_match=weight_match,
+                product_kind=query_kind,
+                query_brand=query_brand,
+                candidate_brand=candidate_brand,
             )
             ranked.append(
                 {
@@ -219,7 +225,8 @@ class ProductMatcher:
     def match_many(
         self,
         product_names: List[str],
-        chunk_size: int = 512,
+        chunk_size: int = 2048,
+        queries: List[str] | None = None,
     ) -> List[List[Dict[str, Any]]]:
         """Match many product names with batched embedding encoding.
 
@@ -234,6 +241,8 @@ class ProductMatcher:
             product_names: Raw product names to match.
             chunk_size: Number of queries encoded/retrieved together. Larger
                 chunks improve throughput but use more transient memory.
+            queries: Optional pre-normalised query strings aligned to
+                ``product_names`` (skips duplicate normalisation in batch runs).
 
         Returns:
             List aligned to ``product_names`` where each element is that
@@ -243,7 +252,10 @@ class ProductMatcher:
         self._require_built()
 
         total = len(product_names)
-        queries = [normalize(name) for name in product_names]
+        if queries is None:
+            queries = [normalize(name) for name in product_names]
+        elif len(queries) != total:
+            raise ValueError("queries must align with product_names when provided")
         results: List[List[Dict[str, Any]]] = [[] for _ in range(total)]
 
         start = time.perf_counter()

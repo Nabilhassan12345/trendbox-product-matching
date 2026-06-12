@@ -18,6 +18,7 @@ from pipeline import (  # noqa: E402
     _build_or_load_tfidf,
     _init_database,
     _load_data,
+    _prepare_catalog,
     _run_batch_processing,
 )
 from src.database import init_db  # noqa: E402
@@ -34,15 +35,17 @@ def main() -> None:
 
     init_db(str(DB_PATH))
     df_barcoded, df_unmatched = _load_data()
-    _init_database(df_barcoded, df_unmatched)
+    df_index, df_canonical_b, df_canonical_u, _ = _prepare_catalog(df_barcoded, df_unmatched)
+    _init_database(df_canonical_b, df_canonical_u)
 
     matcher = ProductMatcher()
-    _build_or_load_tfidf(matcher, df_barcoded, rebuild=False)
-    _build_or_load_faiss(matcher, df_barcoded, rebuild=False)
+    _build_or_load_tfidf(matcher, df_index, rebuild=False)
+    _build_or_load_faiss(matcher, df_index, rebuild=False)
 
-    counts = _run_batch_processing(matcher)
+    counts = _run_batch_processing(matcher, df_index)
     print(
-        f"Batch finished: {counts['auto_approved']:,} auto-approved, "
+        f"Batch finished: {counts.get('stage0_resolved', 0):,} stage-0, "
+        f"{counts['auto_approved']:,} auto-approved, "
         f"{counts['pending']:,} pending, {counts['auto_rejected']:,} auto-rejected"
     )
 

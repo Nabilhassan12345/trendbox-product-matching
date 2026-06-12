@@ -89,11 +89,16 @@ class ConfidenceBuckets(BaseModel):
     low: int = Field(description="Scores < 0.60")
 
 
-class TimelinePoint(BaseModel):
-    """One point on the cumulative approval timeline."""
+class DailyOutcomePoint(BaseModel):
+    """Outcome counts for one calendar day (from real DB timestamps)."""
 
-    time: str
-    cumulative: int
+    day: str
+    approved: int
+    rejected: int
+    auto_approved: int = 0
+    auto_rejected: int = 0
+    operator_approved: int = 0
+    operator_rejected: int = 0
 
 
 class RecentDecisionRow(BaseModel):
@@ -104,15 +109,33 @@ class RecentDecisionRow(BaseModel):
     confidence: float
     decision: str
     time: str
+    source: str = Field(default="operator", description="auto or operator")
+
+
+class RecentMatchRow(BaseModel):
+    """Flattened row for the review history tabs."""
+
+    product_name: str
+    matched_to: str
+    barcode: str
+    confidence: float
+    confidence_label: str
+    status: str
+    source: str
+    time: str
 
 
 class AnalyticsResponse(BaseModel):
     """Full analytics payload for the Streamlit dashboard."""
 
     stats: StatsResponse
-    catalog_total: int = Field(default=100_585, description="Full catalogue row count")
+    catalog_total: int = Field(description="Total products in catalogue (from DB)")
     auto_rejected: int
     confidence_scores: list[float]
     confidence_buckets: ConfidenceBuckets
-    timeline: list[TimelinePoint]
+    daily_outcomes: list[DailyOutcomePoint]
+    manual_minutes_per_match: int = Field(
+        default=2,
+        description="Assumed manual review minutes per match (efficiency estimate only)",
+    )
     recent_decisions: list[RecentDecisionRow]

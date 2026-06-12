@@ -1,222 +1,121 @@
-# Trendbox Product Matching System
+# Trendbox Product Matching
 
-Trendbox Product Matching is an end-to-end ML system that links unmatched Turkish retail product names to a barcoded reference catalogue of ~100,000 items. Retail teams spend hours manually pairing supplier descriptions with internal SKUs; this pipeline automates the easy cases, surfaces uncertain matches for human review, and rejects low-confidence suggestions—cutting manual effort while keeping catalogue quality under operator control.
-
----
-
-## System Architecture
+An end-to-end ML system that links unmatched Turkish retail product names to a barcoded reference catalogue of ~100k items. It auto-approves confident matches, routes uncertain ones to a human reviewer, and rejects weak ones — turning days of manual SKU matching into minutes, without giving up control over catalogue quality.
 
 ```
-RAW DATA → PREPROCESSING → [BARCODED: FAISS INDEX] + [UNMATCHED: EMBEDDING MODEL]
-    → TWO-STAGE PIPELINE → CONFIDENCE SCORING → AUTO-APPROVE / REVIEW / REJECT
-    → OPERATOR UI → FEEDBACK LOOP
+RAW DATA → PREPROCESS → TF-IDF RETRIEVE (top 50) → EMBEDDING RERANK (top 3)
+         → CONFIDENCE SCORE → AUTO-APPROVE / REVIEW / REJECT → OPERATOR UI
 ```
 
-| Stage | Component | Role |
-|-------|-----------|------|
-| **Raw data** | `data/mix_products.csv` | Pipe-separated catalogue: barcoded reference rows and unmatched rows needing links |
-| **Preprocessing** | `src/preprocess.py` | Strips `^` markers, normalises Turkish text, extracts brand/weight features |
-| **Barcoded: FAISS index** | `src/embedding_reranker.py` | Pre-computed multilingual embeddings for 58,434 reference products, indexed for fast vector search |
-| **Unmatched: embedding model** | `paraphrase-multilingual-MiniLM-L12-v2` | Encodes each query product at match time for semantic comparison |
-| **Two-stage pipeline** | `src/tfidf_retriever.py` + `src/matcher.py` | Stage 1: TF-IDF retrieves top 50 candidates; Stage 2: embeddings rerank to top 3 |
-| **Confidence scoring** | `src/confidence.py` | Blends TF-IDF (50%) + embedding (50%) scores with brand/weight bonuses and mismatch penalties |
-| **Auto-approve / review / reject** | `src/database.py`, `api/main.py` | Routes matches by confidence: >0.90 auto-approve, 0.60–0.90 pending review, <0.60 auto-reject |
-| **Operator UI** | `ui/` (Streamlit) | Review queue, analytics dashboard, approve/reject workflow |
-| **Feedback loop** | `POST /decision/{id}` | Operator decisions persist to SQLite and feed analytics for quality monitoring |
-
----
-
-## Tech Stack
-
-| Component | Technology | Why |
-|-----------|------------|-----|
-| Data processing | **pandas** | Load and clean 100k+ row pipe-delimited CSV efficiently |
-| Stage 1 retrieval | **scikit-learn** (TF-IDF) | Fast character-level candidate filtering for Turkish product names |
-| Stage 2 reranking | **sentence-transformers** | Multilingual semantic similarity without per-language models |
-| Vector search | **FAISS** | Sub-second nearest-neighbour search over 58k reference embeddings |
-| Persistence | **SQLAlchemy** + **SQLite** | Lightweight local DB for products, matches, and operator decisions |
-| API layer | **FastAPI** + **Pydantic** | Typed REST endpoints for matching, stats, and review workflow |
-| Operator UI | **Streamlit** + **Altair** | Multipage review interface with live analytics charts |
-| Index caching | **joblib** | Persist TF-IDF vectoriser and FAISS metadata between runs |
-| Testing | **FastAPI TestClient** | Integration tests for every API endpoint |
-
----
-
-## Installation
+## Quick Start
 
 Requires **Python 3.10+**.
 
 ```bash
-git clone https://github.com/Nabilhassan12345/trendbox-product-matching.git && cd trendbox-product-matching
+git clone https://github.com/Nabilhassan12345/trendbox-product-matching.git
+cd trendbox-product-matching
 pip install -r requirements.txt
 python pipeline.py
 ```
 
-The pipeline loads data, builds or restores cached indexes, runs batch matching, starts the API on **http://localhost:8000**, and opens the UI on **http://localhost:8501**.
+`pipeline.py` loads the data, builds or restores cached indexes, runs batch matching, starts the API on `:8000`, and opens the UI on `:8501`. Add `--skip-batch` to start the app without re-matching when the database is already populated.
 
-Configuration is optional — every variable has a sensible default. To override (e.g. for deployment), copy the template and edit it:
-
-```bash
-cp .env.example .env
-```
-
-To skip batch matching when results already exist in the database:
-
-```bash
-python pipeline.py --skip-batch
-```
-
----
+| Service | URL |
+|---------|-----|
+| Operator UI | http://localhost:8501 |
+| API docs (Swagger) | http://localhost:8000/docs |
+| Health check | http://localhost:8000/health |
 
 ## How It Works
 
-### 1. Two-Stage Retrieve-Then-Rerank Pipeline
+**Two-stage retrieve-then-rerank.** Comparing 42k unmatched products against 58k references with an embedding model alone is too slow. Stage 1 uses character-level TF-IDF to retrieve the 50 closest candidates in milliseconds; Stage 2 reranks them with the multilingual `paraphrase-multilingual-MiniLM-L12-v2` model for semantic accuracy.
 
-Matching 42,000 unmatched products against 58,000 references with a single embedding model would be too slow. The system splits the problem:
-
-**Stage 1 — TF-IDF retrieval (top 50)**  
-Each unmatched product name is normalised (Turkish character folding, unit standardisation, lowercase). A TF-IDF vectoriser scores all barcoded products and returns the 50 most similar candidates in milliseconds.
-
-**Stage 2 — Embedding rerank (top 3)**  
-The query and top-50 candidates are encoded with `paraphrase-multilingual-MiniLM-L12-v2`. Cosine similarity reranks them; the three highest-scoring matches are returned with TF-IDF score, embedding score, and a plain-language explanation.
-
-### 2. Confidence Scoring
-
-Each candidate receives an ensemble confidence score, which also ranks the
-candidates (so brand/size mismatches are demoted, not just flagged):
+**Confidence scoring drives triage.** Each candidate gets an ensemble score that also ranks results, so brand/size mismatches are demoted rather than just flagged:
 
 ```
-confidence = (0.50 × TF-IDF) + (0.50 × embedding)
-             + brand/weight match bonus (+0.05 each)
-             − brand/weight mismatch penalty (−0.30 brand, −0.20 weight)
+confidence = 0.50·TF-IDF + 0.50·embedding
+           + brand/weight match bonus  (+0.05 each)
+           − brand/weight mismatch penalty  (−0.30 brand, −0.20 weight)
 ```
 
-| Band | Threshold | Action |
-|------|-----------|--------|
-| High | > 0.90 | Auto-approved — linked without human review |
-| Medium | 0.60 – 0.90 | Pending — sent to operator review queue |
-| Low | < 0.60 | Auto-rejected — not shown as a viable match |
+| Confidence | Action |
+|-----------|--------|
+| > 0.90 | Auto-approved — linked without review |
+| 0.60 – 0.90 | Pending — sent to the operator queue |
+| < 0.60 | Auto-rejected |
 
-The weighting and penalties are evidence-based: evaluation (`scripts/evaluate.py`)
-showed the embedding model assigns very high similarity to brand/size/flavour-
-swapped near-duplicates, so the blend gives TF-IDF equal weight and penalises
-explicit brand/weight mismatches — a different brand or pack size almost always
-means a different barcode.
+The 50/50 weighting and mismatch penalties are evidence-based: evaluation showed the embedding model scores brand/size/flavour-swapped near-duplicates very highly, so TF-IDF is given equal weight and explicit mismatches are penalised — a different brand or pack size almost always means a different barcode.
 
-### 3. Human-in-the-Loop Review
+**Human-in-the-loop.** Medium-confidence matches surface in the Streamlit **Review** page with ranked suggestions and explanations; operators approve or reject, decisions persist to SQLite, and the **Analytics** page tracks match rate, confidence distribution, and throughput.
 
-Medium-confidence matches land in the Streamlit **Review** page. Operators see the unmatched product, up to three ranked suggestions with confidence pills and explanations, and approve or reject each match. Decisions are saved via `POST /decision/{id}` to SQLite and reflected in the **Analytics** dashboard (match rates, confidence distribution, approval timeline). High-confidence matches flow straight through; low-confidence ones are filtered out—keeping the review queue focused on cases where human judgment adds value.
+## Tech Stack
 
----
+| Layer | Technology |
+|-------|-----------|
+| Retrieval (Stage 1) | scikit-learn TF-IDF (char n-grams) |
+| Reranking (Stage 2) | sentence-transformers + FAISS |
+| Persistence | SQLAlchemy + SQLite |
+| API | FastAPI + Pydantic |
+| UI | Streamlit + Altair |
+| Data / caching | pandas, joblib |
 
 ## Project Structure
 
 ```
-trendbox-product-matching/
-├── pipeline.py                  # Single entry point: load → index → batch → API → UI
-├── requirements.txt             # Pinned Python dependencies
-├── .env.example                 # Template for optional environment configuration
-├── README.md                    # This file
-│
-├── data/
-│   ├── mix_products.csv         # Source catalogue (~100,585 rows, pipe-separated)
-│   ├── matching.db              # SQLite database (created at runtime)
-│   ├── tfidf_cache/             # Cached TF-IDF vectoriser (created at runtime)
-│   ├── faiss_cache/             # Cached FAISS index + embeddings (created at runtime)
-│   └── matcher_index/           # Unified matcher snapshot for API startup (created at runtime)
-│
-├── src/
-│   ├── preprocess.py            # CSV loading, ^ stripping, Turkish normalisation, brand/weight extraction
-│   ├── tfidf_retriever.py       # Stage 1: TF-IDF fit, search, and cache I/O
-│   ├── embedding_reranker.py    # Stage 2: SentenceTransformer encode, FAISS index, rerank
-│   ├── confidence.py            # Ensemble scoring, triage bands, UI colour tokens
-│   ├── matcher.py               # Orchestrates two-stage pipeline; build/load/save index
-│   └── database.py              # SQLAlchemy models, product load, match persistence, stats
-│
-├── api/
-│   ├── main.py                  # FastAPI app: health, stats, analytics, match queue, decisions, batch
-│   └── schemas.py               # Pydantic request/response models
-│
-├── ui/
-│   ├── app.py                   # Streamlit home page (health metrics, batch trigger)
-│   ├── api_client.py            # Shared API URL config and HTTP helpers
-│   ├── theme.py                 # Shared CSS and layout components
-│   ├── _bootstrap.py            # Adds project root to sys.path for Streamlit imports
-│   └── pages/
-│       ├── 01_Review.py         # Operator review queue (approve / reject)
-│       └── 02_Analytics.py      # Dashboard: match rates, charts, recent decisions
-│
-├── notebooks/
-│   ├── 01_exploration.ipynb     # EDA: data quality, Turkish text patterns, architecture rationale
-│   └── 02_experiments.ipynb     # Prototype TF-IDF + embedding experiments and threshold tuning
-│
-├── tests/
-│   ├── run_all_tests.py         # Full verification: files, imports, data load, API tests
-│   └── test_api.py              # 30 integration checks for every FastAPI endpoint
-│
-├── scripts/
-│   ├── evaluate.py              # Held-out recall@k + confidence threshold sweep
-│   └── run_batch.py             # Run batch matching only (no API/UI)
-└── .streamlit/
-    └── config.toml              # Streamlit theme and server settings
+pipeline.py            # Single entry point: load → index → batch → API → UI
+src/
+  preprocess.py        # Turkish normalisation, brand/weight extraction, product kind
+  reference_catalog.py # Canonical DB rows vs full alias search index
+  blocking.py          # Stage 0 exact/fuzzy name resolver
+  data_profile.py      # Catalogue quality metrics
+  tfidf_retriever.py   # Stage 1: TF-IDF retrieval
+  embedding_reranker.py# Stage 2: embeddings, FAISS, batched rerank
+  confidence.py        # Ensemble scoring + triage bands
+  matcher.py           # Orchestrates the two-stage pipeline
+  batch.py             # Product-level batch triage
+  database.py          # SQLAlchemy models + persistence
+api/                   # FastAPI app (main.py) + Pydantic schemas
+ui/                    # Streamlit home, Review and Analytics pages
+notebooks/             # 01_exploration, 02_experiments
+scripts/               # evaluate.py (recall@k sweep), profile_data.py, run_batch.py
+tests/                 # Unit + API integration suites
 ```
 
----
-
-## Running Tests
+## Testing & Evaluation
 
 ```bash
-python tests/run_all_tests.py
+python tests/run_all_tests.py                 # full verification (6 suites)
+python scripts/evaluate.py --max-queries 1000 # recall@k + precision/coverage sweep
 ```
 
-This runs six verification suites: required-file checks, module import smoke tests, CSV load validation (100,585 rows), preprocessing unit tests, matcher end-to-end tests, and API integration tests. All must pass before submission.
+The evaluation mines ground truth from the catalogue itself (products sharing a barcode but spelled differently), holds each spelling out of the index, and checks whether the pipeline recovers the correct barcode. It reports **Recall@1/@3** for each approach plus a **precision-vs-coverage sweep** — the evidence behind the confidence thresholds.
 
-To run a single suite:
+## Data pipeline
+
+Catalogue ingestion uses a **cascaded resolver** rather than ML-only matching:
+
+1. **Profile** — `python scripts/profile_data.py` quantifies duplicates, collisions, and dedupe loss
+2. **Normalize + enrich** — Turkish folding, units, brand/weight, product kind (`fresh` vs `branded`)
+3. **Alias index** — all 58k barcoded spellings indexed; SQLite keeps one canonical row per barcode
+4. **Stage 0** — exact/fuzzy name blocking before TF-IDF (see [`docs/DATA_PIPELINE.md`](docs/DATA_PIPELINE.md))
+5. **Stages 1–2** — TF-IDF retrieval + embedding rerank (unchanged architecture)
+6. **Kind-aware confidence** — fresh produce skips false brand-mismatch penalties
+
+After changing reference data or blocking rules, rebuild indexes:
 
 ```bash
-python tests/test_preprocess.py   # fast, no model required
-python tests/test_matcher.py      # builds a small matcher (needs the embedding model)
-python tests/test_api.py          # FastAPI endpoint integration tests
+python pipeline.py --rebuild
 ```
 
----
+## Configuration
 
-## Evaluation
-
-Accuracy is measured against ground truth mined from the catalogue itself:
-products that share a barcode but are spelled differently are, by definition, the
-same product. Each run holds one spelling out of the reference index and checks
-whether the pipeline recovers the correct barcode.
-
-```bash
-python scripts/evaluate.py --max-queries 1000 --target-precision 0.95
-```
-
-It reports **Recall@1 / Recall@3** for TF-IDF only, embeddings only, and the
-two-stage pipeline, plus a **precision-vs-coverage sweep** over the rank-1
-confidence score — the evidence used to set the auto-approve / auto-reject
-thresholds. The reference index reuses cached embeddings, so a run takes about a
-minute on CPU after the one-time model load.
-
----
-
-## Quick Reference
-
-| Service | URL |
-|---------|-----|
-| Streamlit UI | http://localhost:8501 |
-| API docs (Swagger) | http://localhost:8000/docs |
-| Health check | http://localhost:8000/health |
-
-**Environment variables** (optional):
+All variables are optional (sensible defaults). Copy `.env.example` to `.env` to override:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `TRENDBOX_DB_PATH` | `data/matching.db` | SQLite database path |
 | `TRENDBOX_MATCHER_INDEX` | `data/matcher_index` | Matcher index directory |
-| `TRENDBOX_API_URL` | `http://localhost:8000` | API base URL for Streamlit UI |
-
----
+| `TRENDBOX_API_URL` | `http://localhost:8000` | API base URL for the UI |
 
 ## License
 

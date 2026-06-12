@@ -508,6 +508,121 @@ def get_stats() -> Dict[str, Any]:
         }
 
 
+OUTCOME_STATUSES: Dict[str, tuple[str, ...]] = {
+    "approved": (STATUS_AUTO_APPROVED, STATUS_APPROVED),
+    "rejected": (STATUS_AUTO_REJECTED, STATUS_REJECTED),
+    "pending": (STATUS_PENDING,),
+}
+
+
+def get_recent_matches_by_outcome(
+    outcome: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """Return recent rank-1 matches for an outcome band (approved / rejected / pending).
+
+    Rows are ordered by the time the outcome happened: ``Decision.decided_at`` for
+    operator actions, ``Match.created_at`` for auto-triage. This keeps manual
+    approvals/rejections visible at the top of history tabs.
+    """
+    statuses = OUTCOME_STATUSES.get(outcome)
+    if statuses is None:
+        raise ValueError(f"outcome must be one of {sorted(OUTCOME_STATUSES)}")
+
+    with get_session() as session:
+        latest_decision = (
+            session.query(
+                Decision.match_id.label("match_id"),
+                func.max(Decision.decided_at).label("decided_at"),
+            )
+            .group_by(Decision.match_id)
+            .subquery()
+        )
+        event_time = func.coalesce(latest_decision.c.decided_at, Match.created_at)
+        matches = (
+            session.query(Match)
+            .outerjoin(latest_decision, latest_decision.c.match_id == Match.id)
+            .filter(Match.rank == 1, Match.status.in_(statuses))
+            .order_by(event_time.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        rows: List[Dict[str, Any]] = []
+        for match in matches:
+            data = match.to_dict(include_products=True)
+            if match.status in (STATUS_APPROVED, STATUS_REJECTED) and match.decisions:
+                decided = [
+                    record.decided_at
+                    for record in match.decisions
+                    if record.decided_at is not None
+                ]
+                ts = max(decided) if decided else match.created_at
+            else:
+                ts = match.created_at
+            data["event_time"] = ts.isoformat() if ts else (data.get("created_at") or "")
+            rows.append(data)
+        return rows
+
+
+def get_recent_activity(limit: int = 20) -> List[Dict[str, Any]]:
+    """Return a mixed feed of auto-triage outcomes and operator decisions."""
+    rows: List[Dict[str, Any]] = []
+
+    with get_session() as session:
+        auto_matches = (
+            session.query(Match)
+            .filter(
+                Match.rank == 1,
+                Match.status.in_((STATUS_AUTO_APPROVED, STATUS_AUTO_REJECTED)),
+            )
+            .order_by(Match.created_at.desc())
+            .limit(limit * 3)
+            .all()
+        )
+        for match in auto_matches:
+            unmatched = match.unmatched_product
+            suggested = match.suggested_product
+            approved = match.status == STATUS_AUTO_APPROVED
+            rows.append(
+                {
+                    "product_name": unmatched.name,
+                    "matched_to": suggested.name if approved else "—",
+                    "confidence": float(match.confidence_score),
+                    "decision": "approved" if approved else "rejected",
+                    "time": match.created_at.isoformat() if match.created_at else "",
+                    "source": "auto",
+                }
+            )
+
+        decisions = (
+            session.query(Decision)
+            .order_by(Decision.decided_at.desc())
+            .limit(limit * 3)
+            .all()
+        )
+        for record in decisions:
+            match = record.match
+            if match is None:
+                continue
+            unmatched = match.unmatched_product
+            suggested = match.suggested_product
+            rows.append(
+                {
+                    "product_name": unmatched.name,
+                    "matched_to": suggested.name if record.decision == "approved" else "—",
+                    "confidence": float(match.confidence_score),
+                    "decision": record.decision,
+                    "time": record.decided_at.isoformat() if record.decided_at else "",
+                    "source": "operator",
+                }
+            )
+
+    rows.sort(key=lambda item: item.get("time", ""), reverse=True)
+    return rows[:limit]
+
+
 def get_recent_decisions(limit: int = 20) -> List[Dict[str, Any]]:
     """Return the most recent operator decisions.
 
@@ -538,37 +653,66 @@ def get_confidence_scores(rank: int = 1) -> List[float]:
         return [float(row[0]) for row in rows]
 
 
-def get_approval_timeline() -> List[Dict[str, Any]]:
-    """Return cumulative approval counts over time (operator + auto-approved)."""
-    events: List[datetime] = []
+def get_daily_outcome_counts() -> List[Dict[str, Any]]:
+    """Per-calendar-day outcome counts from real event timestamps.
+
+    Auto-triage uses ``Match.created_at``; operator decisions use
+    ``Decision.decided_at``. Counts are never spread or estimated across days.
+    """
+    buckets: Dict[str, Dict[str, int]] = {}
+
+    def _bucket(day: str) -> Dict[str, int]:
+        if day not in buckets:
+            buckets[day] = {
+                "auto_approved": 0,
+                "auto_rejected": 0,
+                "operator_approved": 0,
+                "operator_rejected": 0,
+            }
+        return buckets[day]
 
     with get_session() as session:
-        operator_times = (
-            session.query(Decision.decided_at)
-            .filter(Decision.decision == "approved")
-            .order_by(Decision.decided_at)
+        auto_rows = (
+            session.query(Match.created_at, Match.status)
+            .filter(
+                Match.rank == 1,
+                Match.status.in_((STATUS_AUTO_APPROVED, STATUS_AUTO_REJECTED)),
+            )
             .all()
         )
-        auto_times = (
-            session.query(Match.created_at)
-            .filter(Match.status == "auto_approved")
-            .order_by(Match.created_at)
-            .all()
-        )
+        for created_at, status in auto_rows:
+            if not created_at:
+                continue
+            day = created_at.date().isoformat()
+            if status == STATUS_AUTO_APPROVED:
+                _bucket(day)["auto_approved"] += 1
+            else:
+                _bucket(day)["auto_rejected"] += 1
 
-    events.extend(t[0] for t in operator_times if t[0])
-    events.extend(t[0] for t in auto_times if t[0])
-    events.sort()
+        for decided_at, decision in session.query(
+            Decision.decided_at, Decision.decision
+        ).all():
+            if not decided_at:
+                continue
+            day = decided_at.date().isoformat()
+            if decision == "approved":
+                _bucket(day)["operator_approved"] += 1
+            else:
+                _bucket(day)["operator_rejected"] += 1
 
-    timeline: List[Dict[str, Any]] = []
-    for index, event_time in enumerate(events, start=1):
-        timeline.append(
+    rows: List[Dict[str, Any]] = []
+    for day, counts in sorted(buckets.items()):
+        approved = counts["auto_approved"] + counts["operator_approved"]
+        rejected = counts["auto_rejected"] + counts["operator_rejected"]
+        rows.append(
             {
-                "time": event_time.isoformat(),
-                "cumulative": index,
+                "day": day,
+                "approved": approved,
+                "rejected": rejected,
+                **counts,
             }
         )
-    return timeline
+    return rows
 
 
 if __name__ == "__main__":

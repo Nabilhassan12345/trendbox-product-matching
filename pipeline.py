@@ -21,9 +21,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.batch import process_unmatched
+from src.blocking import Stage0Resolver
 from src.database import Product, get_session, init_db, load_products, replace_matches
 from src.matcher import ProductMatcher
 from src.preprocess import load_and_clean
+from src.reference_catalog import (
+    canonical_barcoded,
+    canonical_unmatched,
+    prepare_reference_index,
+)
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 DATA_CSV = ROOT / "data" / "mix_products.csv"
@@ -39,7 +45,6 @@ UI_APP = ROOT / "ui" / "app.py"
 API_PORT = 8000
 UI_PORT = 8501
 TOP_SUGGESTIONS = 3
-CATALOG_TOTAL = 100_585
 
 REQUIRED_PATHS = (
     DATA_CSV,
@@ -120,6 +125,17 @@ def _load_data() -> tuple[Any, Any]:
     return df_barcoded, df_unmatched
 
 
+def _prepare_catalog(
+    df_barcoded: Any,
+    df_unmatched: Any,
+) -> tuple[Any, Any, Any, Any]:
+    """Split raw frames into alias index (search) and canonical rows (SQLite)."""
+    df_index = prepare_reference_index(df_barcoded)
+    df_canonical_b = canonical_barcoded(df_barcoded)
+    df_canonical_u = canonical_unmatched(df_unmatched)
+    return df_index, df_canonical_b, df_canonical_u, df_barcoded
+
+
 def _init_database(df_barcoded: Any, df_unmatched: Any) -> dict[str, int]:
     start = _step("Step 4 — Initializing database")
     os.environ["TRENDBOX_DB_PATH"] = str(DB_PATH)
@@ -198,7 +214,7 @@ def _sync_matcher_index(matcher: ProductMatcher) -> None:
     matcher.save(str(MATCHER_INDEX_DIR))
 
 
-def _run_batch_processing(matcher: ProductMatcher) -> dict[str, int]:
+def _run_batch_processing(matcher: ProductMatcher, df_index: Any) -> dict[str, int]:
     start = _step("Step 7 — Batch processing (match + triage)")
     if not matcher._built:
         _fail("Matcher is not built — cannot run batch processing.")
@@ -229,12 +245,19 @@ def _run_batch_processing(matcher: ProductMatcher) -> dict[str, int]:
     print(f"  Matching {total:,} unmatched products (this may take a while)…")
     batch_start = time.perf_counter()
 
-    records, counts = process_unmatched(matcher, unmatched_products, barcode_to_id)
+    stage0 = Stage0Resolver(df_index)
+    records, counts = process_unmatched(
+        matcher,
+        unmatched_products,
+        barcode_to_id,
+        stage0=stage0,
+    )
 
     replace_matches(records)
     elapsed = time.perf_counter() - batch_start
     print(
         f"  ✓ Batch complete in {elapsed:.1f}s — "
+        f"{counts['stage0_resolved']:,} stage-0, "
         f"{counts['auto_approved']:,} auto-approved, "
         f"{counts['pending']:,} pending, "
         f"{counts['auto_rejected']:,} auto-rejected"
@@ -381,18 +404,21 @@ def main() -> None:
 
     _check_required_files()
     df_barcoded, df_unmatched = _load_data()
-    db_counts = _init_database(df_barcoded, df_unmatched)
+    df_index, df_canonical_b, df_canonical_u, _df_raw_barcoded = _prepare_catalog(
+        df_barcoded, df_unmatched
+    )
+    db_counts = _init_database(df_canonical_b, df_canonical_u)
     products_loaded = db_counts["barcoded"] + db_counts["unmatched"]
 
     matcher = ProductMatcher()
-    _build_or_load_tfidf(matcher, df_barcoded, rebuild=args.rebuild)
-    _build_or_load_faiss(matcher, df_barcoded, rebuild=args.rebuild)
+    _build_or_load_tfidf(matcher, df_index, rebuild=args.rebuild)
+    _build_or_load_faiss(matcher, df_index, rebuild=args.rebuild)
 
     if args.skip_batch:
         counts = {"auto_approved": 0, "auto_rejected": 0, "pending": 0}
         print("\n▶ Step 7 — Batch processing skipped (--skip-batch)")
     else:
-        counts = _run_batch_processing(matcher)
+        counts = _run_batch_processing(matcher, df_index)
 
     _print_summary(products_loaded, counts)
     _start_api_background()

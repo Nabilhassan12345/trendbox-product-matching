@@ -41,10 +41,18 @@ def is_connection_error(exc: BaseException) -> bool:
     return False
 
 
-def api_get(path: str, timeout: int = 30) -> tuple[dict[str, Any] | None, bool]:
+def api_get(
+    path: str,
+    timeout: int = 30,
+    params: dict[str, Any] | None = None,
+) -> tuple[Any | None, bool]:
     """GET JSON from the API. Returns (data, api_offline)."""
     try:
-        response = requests.get(f"{get_api_url()}{path}", timeout=timeout)
+        response = requests.get(
+            f"{get_api_url()}{path}",
+            params=params,
+            timeout=timeout,
+        )
         response.raise_for_status()
         return response.json(), False
     except requests.RequestException as exc:

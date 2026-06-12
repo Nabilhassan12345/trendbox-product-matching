@@ -1,248 +1,815 @@
-"""Analytics dashboard — metrics, charts, and business impact."""
+"""Analytics dashboard — Labelbox-style design with Plotly 2x2 chart grid."""
 
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import altair as alt
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from ui.api_client import api_get
-from ui.theme import inject_theme, page_hero, show_offline
-
-CATALOG_TOTAL = 100_585
-MANUAL_MINUTES_PER_PRODUCT = 2
+from ui.utils.tables import format_timestamp
+from ui.utils.styles import (
+    badge_html,
+    inject_styles,
+    render_page_header,
+    render_page_nav,
+    render_section_header,
+    section_label,
+    show_offline_card,
+)
 REFRESH_SECONDS = 30
+PAGE_SIZE = 10
+DEFAULT_MANUAL_MINUTES = 2
 
+# ── Page config ───────────────────────────────────────────────────────────────
 
-def _fetch_analytics() -> tuple[dict | None, bool]:
-    """Load analytics payload from the API."""
-    return api_get("/analytics", timeout=5)
+st.set_page_config(
+    page_title="Analytics · Trendbox",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+inject_styles()
 
-
-def _delta(current: int | float, key: str) -> int | float | None:
-    """Compute metric delta vs the previous refresh snapshot."""
-    previous = st.session_state.analytics_prev.get(key)
-    if previous is None:
-        return None
-    return current - previous
-
-
-def _store_snapshot(data: dict) -> None:
-    """Save current values for delta calculations on the next refresh."""
-    stats = data["stats"]
-    st.session_state.analytics_prev = {
-        "matched": stats["matched"],
-        "pending": stats["pending"],
-        "auto_approved": stats["auto_approved"],
-        "operator_approved": stats["operator_approved"],
-        "auto_rejected": data["auto_rejected"],
+# Inject CSS for chart fade-in on initial load
+st.markdown(
+    """
+    <style>
+    /* Fade-in + slide-up for Plotly chart containers */
+    [data-testid="stPlotlyChart"] {
+        animation: chartFadeIn 0.5s ease forwards;
     }
+    @keyframes chartFadeIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to   { opacity: 1; transform: translateY(0);   }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+# ── Plotly base layout ────────────────────────────────────────────────────────
 
-def _render_metrics(data: dict) -> None:
-    stats = data["stats"]
-    total = max(int(stats["total_products"]), int(data.get("catalog_total", CATALOG_TOTAL)))
-    matched = int(stats["matched"])
-    unmatched = int(stats["unmatched"])
-    match_pct = (matched / unmatched * 100) if unmatched else 0.0
-
-    st.markdown('<div class="section-label">Key Metrics</div>', unsafe_allow_html=True)
-    row1 = st.columns(3)
-    row2 = st.columns(3)
-
-    row1[0].metric("Total Products", f"{total:,}")
-    row1[1].metric(
-        "Matched",
-        f"{matched:,}",
-        delta=_delta(matched, "matched"),
-        help=f"{match_pct:.1f}% of unmatched products",
+def _base_layout(height: int = 160, show_legend: bool = False) -> dict:
+    return dict(
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=0, r=0, t=8, b=0),
+        showlegend=show_legend,
+        # Smooth 500ms entrance animation
+        transition=dict(duration=500, easing="cubic-in-out"),
+        # Dark tooltip matching design system
+        hoverlabel=dict(
+            bgcolor="#111827",
+            font_size=12,
+            font_color="white",
+            bordercolor="#111827",
+        ),
+        font=dict(
+            family='-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+            size=11,
+            color="#6B7280",
+        ),
+        xaxis=dict(showgrid=False, showline=False, tickfont=dict(size=10)),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            gridwidth=1,
+            showline=False,
+            tickfont=dict(size=10),
+        ),
+        height=height,
     )
-    row1[1].caption(f"{match_pct:.1f}% of unmatched")
-    row1[2].metric("Pending Review", f"{stats['pending']:,}", delta=_delta(stats["pending"], "pending"))
-
-    row2[0].metric(
-        "Auto-Approved",
-        f"{stats['auto_approved']:,}",
-        delta=_delta(stats["auto_approved"], "auto_approved"),
-    )
-    row2[1].metric(
-        "Operator Approved",
-        f"{stats['operator_approved']:,}",
-        delta=_delta(stats["operator_approved"], "operator_approved"),
-    )
-    row2[2].metric(
-        "Auto-Rejected",
-        f"{data['auto_rejected']:,}",
-        delta=_delta(data["auto_rejected"], "auto_rejected"),
-    )
 
 
-def _render_confidence_chart(data: dict) -> None:
-    st.markdown('<div class="section-label">Confidence Distribution</div>', unsafe_allow_html=True)
-    scores = data.get("confidence_scores") or []
-    buckets = data.get("confidence_buckets") or {"high": 0, "medium": 0, "low": 0}
+# ── Timeline filtering ────────────────────────────────────────────────────────
 
-    if not scores:
-        st.info("No match scores yet — run batch process to populate data.")
-        return
+def _range_cutoff(range_key: str) -> datetime:
+    """Return the inclusive start datetime for a date-range filter."""
+    now = datetime.now(timezone.utc)
+    if range_key == "Last 7 days":
+        return now - timedelta(days=7)
+    if range_key == "Last 30 days":
+        return now - timedelta(days=30)
+    if range_key == "Last 90 days":
+        return now - timedelta(days=90)
+    return datetime(now.year, 1, 1, tzinfo=timezone.utc)
 
-    try:
-        score_df = pd.DataFrame({"score": scores})
-        score_df["bin"] = pd.cut(score_df["score"], bins=20, include_lowest=True)
-        hist_df = score_df.groupby("bin", observed=True).size().reset_index(name="count")
-        hist_df["bin_mid"] = hist_df["bin"].apply(lambda interval: float(interval.mid))
-        hist_df["band"] = hist_df["bin_mid"].apply(
-            lambda mid: "High" if mid >= 0.90 else ("Medium" if mid >= 0.60 else "Low")
+
+def _filter_daily_outcomes(daily: list[dict], range_key: str) -> list[dict]:
+    """Keep daily outcome rows inside the selected date window."""
+    if not daily:
+        return daily
+    cutoff = _range_cutoff(range_key)
+    filtered: list[dict] = []
+    for row in daily:
+        raw = row.get("day", "")
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(raw)).replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                filtered.append(row)
+        except Exception:
+            filtered.append(row)
+    return filtered
+
+
+def _chart_confidence_buckets(buckets: dict[str, int]) -> go.Figure:
+    """Horizontal bar chart for high / medium / low confidence bands."""
+    labels = ["High (≥90%)", "Medium (60–90%)", "Low (<60%)"]
+    values = [
+        int(buckets.get("high", 0)),
+        int(buckets.get("medium", 0)),
+        int(buckets.get("low", 0)),
+    ]
+    colors = ["#10B981", "#F59E0B", "#EF4444"]
+    fig = go.Figure(
+        go.Bar(
+            x=values,
+            y=labels,
+            orientation="h",
+            marker_color=colors,
+            marker_line_width=0,
+            hovertemplate="%{y}: %{x:,}<extra></extra>",
         )
+    )
+    layout = _base_layout(height=140)
+    layout["xaxis"]["showgrid"] = True
+    layout["yaxis"]["showgrid"] = False
+    fig.update_layout(**layout)
+    return fig
 
-        chart = (
-            alt.Chart(hist_df)
-            .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
-            .encode(
-                x=alt.X("bin_mid:Q", title="Confidence score", scale=alt.Scale(domain=[0, 1])),
-                y=alt.Y("count:Q", title="Matches"),
-                color=alt.Color(
-                    "band:N",
-                    title="Band",
-                    scale=alt.Scale(
-                        domain=["High", "Medium", "Low"],
-                        range=["#2ECC71", "#F39C12", "#E74C3C"],
-                    ),
-                ),
-                tooltip=[
-                    alt.Tooltip("bin_mid:Q", title="Score", format=".2f"),
-                    alt.Tooltip("band:N", title="Band"),
-                    alt.Tooltip("count:Q", title="Count"),
-                ],
+
+# ── Chart builders ────────────────────────────────────────────────────────────
+
+def _chart_cumulative_line(daily: list[dict]) -> go.Figure:
+    """Card 1: Cumulative resolved matches — one point per real calendar day."""
+    fig = go.Figure()
+    if daily:
+        df = pd.DataFrame(daily)
+        df["day"] = pd.to_datetime(df["day"])
+        df["resolved"] = df["approved"] + df["rejected"]
+        df["cumulative"] = df["resolved"].cumsum()
+        fig.add_trace(
+            go.Scatter(
+                x=df["day"],
+                y=df["cumulative"],
+                mode="lines+markers",
+                line=dict(color="#E8622A", width=2),
+                marker=dict(size=6, color="#E8622A"),
+                fill="tozeroy",
+                fillcolor="rgba(232,98,42,0.08)",
+                hovertemplate="%{x|%b %d, %Y}<br>%{y:,} resolved<extra></extra>",
             )
-            .properties(height=320)
         )
-        st.altair_chart(chart, use_container_width=True)
-    except Exception as exc:
-        st.warning(f"Could not render confidence chart: {exc}")
-
-    ann1, ann2, ann3 = st.columns(3)
-    ann1.markdown(f"🟢 **High (≥0.90):** {buckets['high']:,}")
-    ann2.markdown(f"🟡 **Medium (0.60–0.90):** {buckets['medium']:,}")
-    ann3.markdown(f"🔴 **Low (<0.60):** {buckets['low']:,}")
+    layout = _base_layout()
+    layout["xaxis"]["tickformat"] = "%b %d"
+    layout["xaxis"]["nticks"] = max(len(daily), 2)
+    fig.update_layout(**layout)
+    return fig
 
 
-def _render_timeline(data: dict) -> None:
-    st.markdown('<div class="section-label">Decision Timeline</div>', unsafe_allow_html=True)
-    timeline = data.get("timeline") or []
-
-    if not timeline:
-        st.info("No approvals recorded yet.")
-        return
-
-    try:
-        timeline_df = pd.DataFrame(timeline)
-        timeline_df["time"] = pd.to_datetime(timeline_df["time"])
-
-        chart = (
-            alt.Chart(timeline_df)
-            .mark_line(point={"filled": True, "size": 60}, color="#0ea5e9", strokeWidth=2.5)
-            .encode(
-                x=alt.X("time:T", title="Time"),
-                y=alt.Y("cumulative:Q", title="Cumulative approvals"),
-                tooltip=[
-                    alt.Tooltip("time:T", title="Time"),
-                    alt.Tooltip("cumulative:Q", title="Total approved"),
-                ],
+def _chart_daily_auto_approved_bar(daily: list[dict]) -> go.Figure:
+    """Card 2: Auto-approved — one bar per day from real ``Match.created_at`` dates."""
+    fig = go.Figure()
+    if daily:
+        labels = [pd.to_datetime(r["day"]).strftime("%b %d") for r in daily]
+        values = [int(r.get("auto_approved", 0)) for r in daily]
+        fig.add_trace(
+            go.Bar(
+                x=labels,
+                y=values,
+                marker_color="#E8622A",
+                marker_line_width=0,
+                hovertemplate="%{x}<br>Auto-approved: %{y:,}<extra></extra>",
             )
-            .properties(height=280)
         )
-        st.altair_chart(chart, use_container_width=True)
-    except Exception as exc:
-        st.warning(f"Could not render timeline: {exc}")
+    layout = _base_layout()
+    fig.update_layout(**layout)
+    return fig
 
 
-def _render_recent_decisions(data: dict) -> None:
-    st.markdown('<div class="section-label">Recent Decisions</div>', unsafe_allow_html=True)
-    rows = data.get("recent_decisions") or []
-
-    if not rows:
-        st.info("No operator decisions yet.")
-        return
-
-    table_df = pd.DataFrame(rows)
-    table_df.columns = ["Product Name", "Matched To", "Confidence", "Decision", "Time"]
-    table_df["Confidence"] = table_df["Confidence"].map(lambda value: f"{float(value):.3f}")
-
-    try:
-        def _row_style(row: pd.Series) -> list[str]:
-            if str(row["Decision"]).lower() == "approved":
-                return ["background-color: #d1fae5; color: #065f46"] * len(row)
-            return ["background-color: #fee2e2; color: #991b1b"] * len(row)
-
-        st.dataframe(
-            table_df.style.apply(_row_style, axis=1),
-            use_container_width=True,
-            hide_index=True,
+def _chart_daily_operator_bar(daily: list[dict]) -> go.Figure:
+    """Card 3: Operator approved — one bar per day from real ``Decision.decided_at`` dates."""
+    fig = go.Figure()
+    if daily:
+        labels = [pd.to_datetime(r["day"]).strftime("%b %d") for r in daily]
+        values = [int(r.get("operator_approved", 0)) for r in daily]
+        fig.add_trace(
+            go.Bar(
+                x=labels,
+                y=values,
+                marker_color="#E8622A",
+                marker_line_width=0,
+                hovertemplate="%{x}<br>Operator approved: %{y:,}<extra></extra>",
+            )
         )
-    except Exception:
-        st.dataframe(table_df, use_container_width=True, hide_index=True)
+    layout = _base_layout()
+    fig.update_layout(**layout)
+    return fig
 
 
-def _render_business_impact(data: dict) -> None:
-    st.markdown('<div class="section-label">Business Impact</div>', unsafe_allow_html=True)
-    auto_approved = int(data["stats"]["auto_approved"])
-    minutes_saved = auto_approved * MANUAL_MINUTES_PER_PRODUCT
-    hours_saved = minutes_saved / 60
+def _chart_decisions_stacked(
+    daily: list[dict],
+    *,
+    approved_total: int,
+    rejected_total: int,
+) -> go.Figure:
+    """Card 4: Decisions — stacked bar with real daily approved/rejected counts."""
+    fig = go.Figure()
 
-    st.metric(
-        "⏱️ Estimated Time Saved",
-        f"{hours_saved:,.1f} hours",
-        help=f"{auto_approved:,} auto-approved × {MANUAL_MINUTES_PER_PRODUCT} min per product",
+    if daily:
+        labels = [pd.to_datetime(r["day"]).strftime("%b %d") for r in daily]
+        approved_vals = [int(r["approved"]) for r in daily]
+        rejected_vals = [int(r["rejected"]) for r in daily]
+        fig.add_trace(
+            go.Bar(
+                name="Approved",
+                x=labels,
+                y=approved_vals,
+                marker_color="#E8622A",
+                marker_line_width=0,
+                hovertemplate="%{x}<br>Approved: %{y:,}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                name="Rejected",
+                x=labels,
+                y=rejected_vals,
+                marker_color="#3B82F6",
+                marker_line_width=0,
+                hovertemplate="%{x}<br>Rejected: %{y:,}<extra></extra>",
+            )
+        )
+        fig.update_layout(barmode="stack")
+    else:
+        fig.add_trace(
+            go.Bar(
+                name="Approved",
+                x=["Total"],
+                y=[approved_total],
+                marker_color="#E8622A",
+                marker_line_width=0,
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                name="Rejected",
+                x=["Total"],
+                y=[rejected_total],
+                marker_color="#3B82F6",
+                marker_line_width=0,
+            )
+        )
+        fig.update_layout(barmode="group")
+
+    layout = _base_layout(show_legend=True)
+    layout["legend"] = dict(
+        orientation="h",
+        yanchor="top",
+        y=1.02,
+        xanchor="right",
+        x=1.0,
+        font=dict(size=10),
+        bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_layout(**layout)
+    return fig
+
+
+# ── Metric card renderer ──────────────────────────────────────────────────────
+
+def _metric_card(label: str, value: int | str, fig: go.Figure) -> None:
+    """Render one cell of the 2x2 grid: label + big number + Plotly chart."""
+    value_str = f"{value:,}" if isinstance(value, int) else str(value)
+    st.markdown(
+        f'<div class="lb-metric-label">{label} <span style="color:#D1D5DB;">ⓘ</span></div>',
+        unsafe_allow_html=True,
     )
     st.markdown(
-        f'<div class="impact-card"><p>💰 This system has saved your team '
-        f"<strong>{hours_saved:,.1f} hours</strong> of manual work "
-        f"({auto_approved:,} products × {MANUAL_MINUTES_PER_PRODUCT} min).</p></div>",
+        f'<div class="lb-metric-value">{value_str}</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+# ── Recent decisions table ────────────────────────────────────────────────────
+
+def _filter_activity_rows(rows: list[dict], decision_filter: str) -> list[dict]:
+    """Apply the decision/source filter to recent activity rows."""
+    if decision_filter == "All":
+        return rows
+    if decision_filter == "Approved":
+        return [r for r in rows if str(r.get("decision", "")).lower() == "approved"]
+    if decision_filter == "Rejected":
+        return [r for r in rows if str(r.get("decision", "")).lower() == "rejected"]
+    if decision_filter == "Auto only":
+        return [r for r in rows if str(r.get("source", "")).lower() == "auto"]
+    if decision_filter == "Operator only":
+        return [r for r in rows if str(r.get("source", "")).lower() == "operator"]
+    return rows
+
+
+def _render_decisions_table(rows: list[dict], decision_filter: str = "All") -> None:
+    section_label("RECENT ACTIVITY")
+    rows = _filter_activity_rows(rows, decision_filter)
+
+    st.markdown(
+        """
+        <style>
+        .decision-row { transition: background 0.1s ease; }
+        .decision-row:hover { background: #F9FAFB !important; cursor: default; }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
 
+    if not rows:
+        st.markdown(
+            '<div class="lb-card" style="color:#6B7280; text-align:center; padding:32px;">'
+            "No activity matches this filter yet."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    if "decisions_page" not in st.session_state:
+        st.session_state.decisions_page = 0
+
+    total_rows = len(rows)
+    total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(st.session_state.decisions_page, total_pages - 1)
+    start_idx = page * PAGE_SIZE
+    end_idx = min(start_idx + PAGE_SIZE, total_rows)
+    page_rows = rows[start_idx:end_idx]
+
+    # Table header — grid has no border-strip column; rows carry border-left directly
+    st.markdown(
+        """
+        <div style="border:1px solid #E5E7EB; border-radius:8px; overflow:hidden;">
+        <div class="lb-table-header" style="display:grid;
+             grid-template-columns:28px 1fr 1fr 110px 100px 130px;
+             gap:8px; padding:8px 15px;">
+          <span></span>
+          <span>Product Name</span>
+          <span>Matched To</span>
+          <span>Confidence</span>
+          <span>Decision</span>
+          <span>Time</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    for i, row in enumerate(page_rows):
+        product    = row.get("product_name", "—")
+        match_name = row.get("matched_to", "—")
+        conf       = float(row.get("confidence", 0))
+        decision   = str(row.get("decision", "—")).capitalize()
+        ts = format_timestamp(str(row.get("time", "—")))
+
+        is_approved = decision.lower() == "approved"
+        # Colored left border applied directly on the row div — stretches full height
+        left_border = "#10B981" if is_approved else "#EF4444"
+        dec_color   = "#065F46" if is_approved else "#991B1B"
+        bg          = "#FAFAFA" if i % 2 == 0 else "#FFFFFF"
+        conf_label  = "HIGH" if conf >= 0.9 else ("MEDIUM" if conf >= 0.6 else "LOW")
+        conf_badge  = badge_html(conf_label, conf)
+
+        st.markdown(
+            f"""
+            <div class="decision-row" style="
+                 display:grid;
+                 grid-template-columns:28px 1fr 1fr 110px 100px 130px;
+                 gap:8px; padding:10px 12px; border-top:1px solid #F3F4F6;
+                 border-left:3px solid {left_border};
+                 background:{bg}; font-size:13px; color:#374151; align-items:center;">
+              <span style="color:#9CA3AF;">☐</span>
+              <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+                    title="{product}">{product[:40]}</span>
+              <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+                    title="{match_name}">{match_name[:40]}</span>
+              <span>{conf_badge}</span>
+              <span style="font-weight:600; color:{dec_color};">{decision}</span>
+              <span style="color:#9CA3AF;">{ts}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Total row — match header grid, no left border accent
+    st.markdown(
+        f"""
+        <div class="lb-table-total" style="display:grid;
+             grid-template-columns:28px 1fr 1fr 110px 100px 130px;
+             gap:8px; padding:10px 15px; border-top:1px solid #E5E7EB;">
+          <span></span>
+          <span>Total ({total_rows:,})</span>
+          <span></span><span></span><span></span><span></span>
+        </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Pagination
+    pag_l, pag_r = st.columns([3, 2])
+    with pag_r:
+        prev_col, info_col, next_col = st.columns([1, 3, 1])
+        with prev_col:
+            if st.button("‹", key="pg_prev", disabled=page == 0):
+                st.session_state.decisions_page -= 1
+                st.rerun()
+        with info_col:
+            st.markdown(
+                f'<div class="lb-pagination">'
+                f"Rows per page: {PAGE_SIZE}&nbsp;&nbsp;"
+                f"{start_idx + 1}–{end_idx} of {total_rows:,}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        with next_col:
+            if st.button("›", key="pg_next", disabled=page >= total_pages - 1):
+                st.session_state.decisions_page += 1
+                st.rerun()
+
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
 
 def _render_dashboard() -> None:
-    data, offline = _fetch_analytics()
+    data, offline = api_get("/analytics", timeout=10)
     if offline:
-        show_offline()
+        show_offline_card()
     if data is None:
         st.error("Could not load analytics data from the API.")
         return
 
-    _render_metrics(data)
-    st.divider()
-    _render_confidence_chart(data)
-    st.divider()
-    _render_timeline(data)
-    st.divider()
-    _render_recent_decisions(data)
-    st.divider()
-    _render_business_impact(data)
-    _store_snapshot(data)
+    stats = data["stats"]
+    date_range = st.session_state.get("date_range", "Last 30 days")
+    daily_outcomes = _filter_daily_outcomes(
+        data.get("daily_outcomes") or [],
+        date_range,
+    )
+    recent_decisions = data.get("recent_decisions") or []
+    confidence_buckets = data.get("confidence_buckets") or {"high": 0, "medium": 0, "low": 0}
+    catalog_total = int(data.get("catalog_total") or stats.get("total_products", 0))
+    auto_rejected = int(data.get("auto_rejected", 0))
+    manual_minutes = int(data.get("manual_minutes_per_match", DEFAULT_MANUAL_MINUTES))
+    analytics_view = st.session_state.get("analytics_nav", "Throughput")
+
+    matched = int(stats["matched"])
+    auto_approved = int(stats["auto_approved"])
+    operator_approved = int(stats["operator_approved"])
+    rejected = int(stats.get("rejected", 0))
+    pending = int(stats.get("pending", 0))
+    unmatched_total = int(stats.get("unmatched", catalog_total))
+    avg_confidence = float(stats.get("avg_confidence", 0.0))
+    total_decisions = matched + rejected
+
+    total_auto = auto_approved + auto_rejected
+    hours_saved = (total_auto * manual_minutes) / 60
+    processed = matched + rejected
+    pct_done = processed / max(unmatched_total, 1)
+    days_saved = int(hours_saved / 8)
+    pct_display = pct_done * 100
+
+    render_page_nav("analytics")
+
+    _view_copy = {
+        "Throughput": (
+            "Throughput",
+            "Volume trends, auto-approval rates, and recent match activity.",
+        ),
+        "Efficiency": (
+            "Efficiency",
+            "Time saved by automation and catalog completion progress.",
+        ),
+        "Quality": (
+            "Quality",
+            "Confidence score distribution across rank-1 suggestions.",
+        ),
+    }
+    view_title, view_desc = _view_copy.get(analytics_view, _view_copy["Throughput"])
+
+    render_page_header(
+        view_title,
+        view_desc,
+        eyebrow="Trendbox · Analytics",
+        meta="Refreshes every 30 seconds",
+    )
+
+    tab_col, range_col = st.columns([3, 1], gap="medium")
+    with tab_col:
+        st.radio(
+            "View",
+            ["Throughput", "Efficiency", "Quality"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="analytics_nav",
+            index=0,
+        )
+    with range_col:
+        if analytics_view == "Throughput":
+            st.selectbox(
+                "Date range",
+                ["Last 30 days", "Last 7 days", "Last 90 days", "Year to date"],
+                label_visibility="collapsed",
+                key="date_range",
+            )
+
+    # ── THROUGHPUT ────────────────────────────────────────────────────────────
+    if analytics_view == "Throughput":
+        render_section_header(
+            "Performance overview",
+            "Charts use real event dates from the database — not estimated daily splits.",
+        )
+
+        if len(daily_outcomes) == 1:
+            day_label = pd.to_datetime(daily_outcomes[0]["day"]).strftime("%B %d, %Y")
+            st.caption(f"All activity in this window occurred on {day_label} (batch run).")
+        elif not daily_outcomes:
+            st.caption("No resolved matches in the selected date range.")
+
+        filt_col, _ = st.columns([2, 4])
+        with filt_col:
+            decision_filter = st.selectbox(
+                "Activity filter",
+                ["All", "Approved", "Rejected", "Auto only", "Operator only"],
+                key="decision_filter",
+            )
+
+        row1_c1, row1_c2 = st.columns(2, gap="medium")
+        row2_c1, row2_c2 = st.columns(2, gap="medium")
+
+        with row1_c1:
+            with st.container(border=True):
+                _metric_card("Matched", matched, _chart_cumulative_line(daily_outcomes))
+
+        with row1_c2:
+            with st.container(border=True):
+                _metric_card(
+                    "Auto-Approved",
+                    auto_approved,
+                    _chart_daily_auto_approved_bar(daily_outcomes),
+                )
+
+        with row2_c1:
+            with st.container(border=True):
+                _metric_card(
+                    "Operator Approved",
+                    operator_approved,
+                    _chart_daily_operator_bar(daily_outcomes),
+                )
+
+        with row2_c2:
+            with st.container(border=True):
+                _metric_card(
+                    "Decisions",
+                    total_decisions,
+                    _chart_decisions_stacked(
+                        daily_outcomes,
+                        approved_total=matched,
+                        rejected_total=rejected,
+                    ),
+                )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        with st.container(border=True):
+            _render_decisions_table(recent_decisions, decision_filter)
+
+    # ── EFFICIENCY ──────────────────────────────────────────────────────────
+    elif analytics_view == "Efficiency":
+        render_section_header(
+            "Automation impact",
+            f"Estimated time saved (assumes {manual_minutes} min per manual match) "
+            "and triage progress across unmatched products.",
+        )
+        e1, e2, e3, e4 = st.columns(4, gap="medium")
+        with e1:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">PENDING REVIEW</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="lb-metric-value amber">{pending:,}</div>', unsafe_allow_html=True)
+        with e2:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">AUTO-PROCESSED</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="lb-metric-value">{total_auto:,}</div>', unsafe_allow_html=True)
+        with e3:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">HOURS SAVED</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(hours_saved):,}</div>',
+                    unsafe_allow_html=True,
+                )
+        with e4:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">WORKING DAYS SAVED</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="lb-metric-value">{days_saved:,}</div>', unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        with st.container(border=True):
+            left_col, right_col = st.columns([3, 2], gap="large")
+
+            with left_col:
+                section_label("ESTIMATED TIME SAVED")
+                st.markdown(
+                    f'<div id="impact-hours" style="font-size:36px; font-weight:700; '
+                    f'color:#111827; margin-bottom:4px;">0 hours</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    '<div style="font-size:13px; color:#6B7280;">'
+                    f"Based on {manual_minutes} min per manual match (estimate) "
+                    f"({total_auto:,} auto-processed products)"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with right_col:
+                st.markdown(
+                    f'<div style="font-size:18px; font-weight:700; color:#111827; '
+                    f'margin-bottom:8px;">{pct_done:.1%} complete</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    """
+                    <div style="background:#F3F4F6; border-radius:4px; height:6px;
+                                overflow:hidden; margin-bottom:6px;">
+                      <div id="impact-bar-fill" style="
+                           background:linear-gradient(90deg,#E8622A,#F97316);
+                           height:100%; width:0%; border-radius:4px;
+                           transition:width 1s cubic-bezier(.4,0,.2,1);"></div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div style="font-size:12px; color:#9CA3AF; margin-top:4px;">'
+                    f"= {days_saved:,} full working days saved"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div style="font-size:12px; color:#6B7280; margin-top:6px;">'
+                    f"{processed:,} of {unmatched_total:,} unmatched products triaged"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── QUALITY ───────────────────────────────────────────────────────────────
+    else:
+        render_section_header(
+            "Match confidence",
+            "How reliably the model ranks its top suggestion per product.",
+        )
+        q1, q2, q3 = st.columns(3, gap="medium")
+        with q1:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">AVG CONFIDENCE</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{avg_confidence:.3f}</div>',
+                    unsafe_allow_html=True,
+                )
+        with q2:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">HIGH CONFIDENCE</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value">{int(confidence_buckets.get("high", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+        with q3:
+            with st.container(border=True):
+                st.markdown('<div class="lb-metric-label">NEEDS REVIEW</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="lb-metric-value amber">{int(confidence_buckets.get("medium", 0)):,}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        with st.container(border=True):
+            section_label("CONFIDENCE DISTRIBUTION (RANK-1 MATCHES)")
+            st.plotly_chart(
+                _chart_confidence_buckets(confidence_buckets),
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+            st.caption(
+                f"Low confidence: {int(confidence_buckets.get('low', 0)):,} · "
+                f"Medium: {int(confidence_buckets.get('medium', 0)):,} · "
+                f"High: {int(confidence_buckets.get('high', 0)):,}"
+            )
+
+    # ── Last updated timestamp ─────────────────────────────────────────────────
+    st.markdown(
+        f'<div style="text-align:right; font-size:11px; color:#9CA3AF; '
+        f'margin-top:8px;">Last updated: {datetime.now().strftime("%H:%M:%S")}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Count-up animations + progress bar ────────────────────────────────────
+    # Uses a retry loop (up to 3 s) so it works regardless of React render timing.
+    # height=1 is safer than height=0 for cross-origin script execution.
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            var TARGET_HOURS  = {int(hours_saved)};
+            var TARGET_BAR    = {pct_display:.1f};   /* percent 0-100 */
+
+            function countUp(el, target, duration, suffix) {{
+                if (target <= 0) {{
+                    el.textContent = '0' + (suffix || '');
+                    return;
+                }}
+                var start = 0;
+                var step  = target / (duration / 16);
+                var timer = setInterval(function() {{
+                    start += step;
+                    var val = Math.floor(start);
+                    el.textContent = val.toLocaleString('en-US') + (suffix || '');
+                    if (start >= target) {{
+                        el.textContent = target.toLocaleString('en-US') + (suffix || '');
+                        clearInterval(timer);
+                    }}
+                }}, 16);
+            }}
+
+            function runAnimations(doc) {{
+                /* ── 4 metric-value big numbers ── */
+                doc.querySelectorAll('.lb-metric-value').forEach(function(el) {{
+                    /* skip if already animated (data-animated flag) */
+                    if (el.dataset.animated) return;
+                    el.dataset.animated = '1';
+                    var raw = el.textContent.replace(/,/g, '').trim();
+                    var num = parseInt(raw, 10);
+                    if (!isNaN(num) && num > 0) {{
+                        el.textContent = '0';
+                        countUp(el, num, 1000, '');
+                    }}
+                }});
+
+                /* ── Hours-saved count-up ── */
+                var hoursEl = doc.getElementById('impact-hours');
+                if (hoursEl && !hoursEl.dataset.animated) {{
+                    hoursEl.dataset.animated = '1';
+                    hoursEl.textContent = '0 hours';
+                    countUp(hoursEl, TARGET_HOURS, 1200, ' hours');
+                }}
+
+                /* ── Progress bar fill ── */
+                var bar = doc.getElementById('impact-bar-fill');
+                if (bar && !bar.dataset.animated) {{
+                    bar.dataset.animated = '1';
+                    /* tiny delay so the CSS transition has a "from" state */
+                    setTimeout(function() {{
+                        bar.style.width = TARGET_BAR.toFixed(1) + '%';
+                    }}, 80);
+                }}
+            }}
+
+            /* Retry every 200 ms for up to 3 seconds (15 attempts) */
+            var attempts = 0;
+            function tryInit() {{
+                var doc = window.parent.document;
+                var metrics = doc.querySelectorAll('.lb-metric-value');
+                var hoursEl = doc.getElementById('impact-hours');
+                if ((metrics.length > 0 || hoursEl) ) {{
+                    runAnimations(doc);
+                }} else if (attempts < 15) {{
+                    attempts++;
+                    setTimeout(tryInit, 200);
+                }}
+            }}
+            tryInit();
+        }})();
+        </script>
+        """,
+        height=1,
+    )
 
 
-st.set_page_config(page_title="Analytics", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
-inject_theme()
-
-page_hero(
-    "Analytics Dashboard",
-    f"Live pipeline metrics · refreshes every {REFRESH_SECONDS} seconds",
-)
+# ── Session init ──────────────────────────────────────────────────────────────
 
 if "analytics_prev" not in st.session_state:
     st.session_state.analytics_prev = {}
 
 
+# ── Auto-refresh fragment ─────────────────────────────────────────────────────
+
 @st.fragment(run_every=REFRESH_SECONDS)
-def _auto_refresh_dashboard() -> None:
+def _auto_refresh() -> None:
     _render_dashboard()
 
 
-_auto_refresh_dashboard()
+_auto_refresh()

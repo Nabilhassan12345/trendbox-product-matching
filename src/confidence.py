@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+ProductKind = str  # "branded" | "fresh" | "unknown"
+
 # Weighted blend of Stage 1 (TF-IDF) and Stage 2 (embedding) scores.
 #
 # Tuning note: evaluation on held-out same-barcode spelling variants
@@ -34,11 +36,59 @@ COLOR_MEDIUM = "#F39C12"
 COLOR_LOW = "#E74C3C"
 
 
+def _edit_distance_leq(a: str, b: str, max_distance: int) -> bool:
+    """Return True when Levenshtein distance between *a* and *b* is at most *max_distance*."""
+    if a == b:
+        return True
+    if max_distance < 0:
+        return False
+    if abs(len(a) - len(b)) > max_distance:
+        return False
+
+    if len(a) < len(b):
+        a, b = b, a
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, start=1):
+        current = [i]
+        row_min = current[0]
+        for j, char_b in enumerate(b, start=1):
+            insert_cost = current[j - 1] + 1
+            delete_cost = previous[j] + 1
+            replace_cost = previous[j - 1] + (char_a != char_b)
+            value = min(insert_cost, delete_cost, replace_cost)
+            current.append(value)
+            row_min = min(row_min, value)
+        if row_min > max_distance:
+            return False
+        previous = current
+    return previous[-1] <= max_distance
+
+
+def resolve_brand_match(
+    query_brand: str,
+    candidate_brand: str,
+    product_kind: ProductKind = "unknown",
+) -> Optional[bool]:
+    """Tri-state brand agreement with fresh-produce spelling tolerance."""
+    if not query_brand or not candidate_brand:
+        return None
+    if query_brand == candidate_brand:
+        return True
+    if product_kind == "fresh" and _edit_distance_leq(query_brand, candidate_brand, 1):
+        return True
+    if product_kind == "fresh":
+        return None
+    return False
+
+
 def compute_confidence(
     tfidf_score: float,
     embedding_score: float,
     brand_match: Optional[bool],
     weight_match: Optional[bool],
+    product_kind: ProductKind = "unknown",
+    query_brand: str = "",
+    candidate_brand: str = "",
 ) -> float:
     """Compute an ensemble confidence score from retrieval and reranking signals.
 
@@ -57,10 +107,17 @@ def compute_confidence(
             is unknown (neutral).
         weight_match: ``True`` / ``False`` / ``None`` for weight/volume, with the
             same meaning as ``brand_match``.
+        product_kind: ``branded``, ``fresh``, or ``unknown`` — adjusts brand penalties.
+        query_brand: Optional explicit query brand token (overrides *brand_match* when set).
+        candidate_brand: Optional candidate brand token.
 
     Returns:
         Final confidence in ``[0.0, 1.0]``.
     """
+    if query_brand or candidate_brand:
+        brand_match = resolve_brand_match(query_brand, candidate_brand, product_kind)
+    elif brand_match is False and product_kind == "fresh":
+        brand_match = None
     # Clamp TF-IDF to [0, 1] — cosine similarity range (guards against accidental
     # use of tfidf_score_adjusted which can exceed 1.0 after Stage-1 bonuses).
     tfidf_clamped = max(0.0, min(1.0, tfidf_score))

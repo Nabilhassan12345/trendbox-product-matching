@@ -1,0 +1,38 @@
+{
+  "source_file": "/Users/nabilhassan/trendbox-product-matching/data/mix_products.csv",
+  "row_counts": {
+    "total": 100585,
+    "barcoded": 58434,
+    "unmatched": 42151
+  },
+  "barcode_duplicates": {
+    "duplicate_barcode_rows": 33944,
+    "barcodes_with_multiple_rows": 10290,
+    "barcodes_with_multiple_spellings": 9132
+  },
+  "name_collisions": {
+    "name_clean_mapping_to_multiple_barcodes": 1331,
+    "unmatched_barcoded_exact_name_clean_overlap": 2773
+  },
+  "enrichment_gaps": {
+    "unmatched_missing_weight": 18928,
+    "unmatched_missing_weight_pct": 44.91,
+    "barcoded_missing_weight": 16304,
+    "barcoded_missing_weight_pct": 27.9,
+    "unmatched_short_names_lt_8_chars": 437,
+    "unmatched_short_first_token_le_3_chars": 5202
+  },
+  "empty_names": {
+    "barcoded": 1,
+    "unmatched": 0
+  },
+  "dedupe_impact": {
+    "barcoded_rows_before": 58434,
+    "barcoded_rows_after": 34780,
+    "barcoded_rows_dropped": 23654,
+    "unmatched_rows_before": 42151,
+    "unmatched_rows_after": 38541,
+    "unmatched_rows_dropped": 3610,
+    "total_rows_after_dedupe": 73321
+  }
+}
