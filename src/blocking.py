@@ -184,6 +184,16 @@ class Stage0Resolver:
             and extract_weight(candidate_clean)
             and extract_weight(query) == extract_weight(candidate_clean)
         )
+        if ambiguous:
+            triage_action = "review"
+        else:
+            triage_action = triage(
+                confidence,
+                brand_match,
+                weight_match,
+                query,
+                candidate_clean,
+            )
         hit = {
             "rank": 1,
             "barcode": barcode,
@@ -195,12 +205,6 @@ class Stage0Resolver:
             "confidence_label": label,
             "confidence_color": get_confidence_color(confidence),
             "explanation": explanation,
-            "triage": triage(
-                confidence,
-                brand_match,
-                weight_match,
-                query,
-                candidate_clean,
-            ),
+            "triage": triage_action,
         }
         return [hit]

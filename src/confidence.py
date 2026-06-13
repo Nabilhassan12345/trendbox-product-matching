@@ -233,7 +233,11 @@ def triage(
     Returns:
         ``"auto_approve"``, ``"review"``, or ``"auto_reject"``.
     """
-    if query_clean.strip() == candidate_clean.strip():
+    if (
+        query_clean.strip()
+        and candidate_clean.strip()
+        and query_clean.strip() == candidate_clean.strip()
+    ):
         return "auto_approve"
 
     if brand_match and BRAND_REVIEW_LOW <= confidence < MEDIUM_THRESHOLD:
