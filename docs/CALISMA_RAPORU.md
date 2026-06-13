@@ -118,6 +118,49 @@ Ortalama rank-1 güven skoru: 0,62. Operatör kuyruğundaki ~10,5 bin ürün hen
 
 ---
 
+## İyileştirmeler
+
+İlk sistemin üzerine üç önemli iyileştirme yapıldı:
+
+### 1. Üç Sinyalli Güven Skoru
+
+Orijinal formül TF-IDF ve embedding'i eşit ağırlıkla birleştiriyordu. Yeni formül üçüncü bir sinyal olarak rapidfuzz `token_sort_ratio` ekliyor:
+
+```
+confidence = 0.40×TF-IDF + 0.40×embedding + 0.20×fuzzy
+```
+
+Bu değişiklik Recall@1'i 0.596'dan 0.608'e yükseltti.
+
+### 2. Akıllı Triage Kuralları
+
+İki yeni kural eklendi:
+
+- Normalize edilmiş isim tam eşleşmesi → otomatik onay
+- Marka eşleşmesi + 0.45–0.60 güven → operatör incelemesi (otomatik red yerine)
+
+Bu kurallar 1.227 ürünü otomatik redden kurtardı.
+
+### 3. Türkçe Perakende İçin Ağırlık Tespiti
+
+Kg cinsinden satılan ürünler (taze sebze/meyve) artık doğru birim sinyali alıyor:
+
+- `"Patates Kg"` → `weight="kg"`
+- `"Avokado Adet"` → `weight="adet"`
+
+Bu değişiklik taze ürünlerde hatalı ceza uygulanmasını önledi.
+
+### Sonuçlar
+
+| Metrik | Önce | Sonra |
+|--------|------|-------|
+| Recall@1 | 0.596 | 0.608 |
+| Recall@3 | 0.776 | 0.792 |
+| Ort. güven | 0.598 | 0.639 |
+| Otomatik red | 19.400 | 18.173 |
+
+---
+
 ## Çalıştırma
 
 ```bash

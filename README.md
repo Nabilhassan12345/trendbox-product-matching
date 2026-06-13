@@ -171,16 +171,17 @@ sequenceDiagram
 Ranked suggestions use an ensemble score; triage is decided from **rank-1 only** (one product → one outcome):
 
 ```
-confidence = 0.50·TF-IDF + 0.50·embedding
-           + brand/weight match bonus  (+0.05 each)
-           − brand/weight mismatch penalty  (−0.30 brand, −0.20 weight)
+confidence = 0.40×TF-IDF + 0.40×embedding + 0.20×fuzzy
+           + brand/weight match bonus (+0.05 each)
+           − brand mismatch penalty (−0.20)
+           − weight mismatch penalty (−0.15)
 ```
 
-| Confidence | Action |
-|------------|--------|
-| > 0.90 | Auto-approved — linked without review |
-| 0.60 – 0.90 | Pending — operator queue |
-| < 0.60 | Auto-rejected |
+**Triage rules** (applied in order before standard thresholds):
+
+1. Exact normalized name match → `auto_approve`
+2. Brand match + confidence 0.45–0.60 → `review` (not auto-reject)
+3. Standard: > 0.90 approve · 0.60–0.90 review · < 0.60 reject
 
 Fresh produce (`product_kind = fresh`) skips false brand-mismatch penalties. Thresholds are justified by held-out evaluation — see [Results](#results).
 
@@ -219,25 +220,22 @@ All retrieval artifacts live in one directory (default `data/matcher_index/`):
 
 Metrics from `scripts/evaluate.py` (held-out same-barcode alternate spellings) and a full batch run on the catalogue. Regenerate with the commands in [Operations](#operations).
 
-### Retrieval quality (100 held-out queries)
+### Retrieval quality (500 held-out queries)
 
 | Approach | Recall@1 | Recall@3 |
 |----------|---------:|---------:|
-| TF-IDF only | 0.69 | 0.85 |
-| Embedding only | 0.55 | 0.65 |
-| **Two-stage (production)** | **0.66** | **0.83** |
-
-Average latency per query (100 queries): TF-IDF ~31 ms · embedding ~19 ms · two-stage ~77 ms.
+| TF-IDF only | ~0.60 | ~0.79 |
+| **Two-stage (production)** | **0.608** | **0.792** |
 
 ### Batch triage (full unmatched set)
 
 | Outcome | Count |
 |---------|------:|
-| Stage 0 resolved (exact + fuzzy) | 3,391 |
-| ML resolved | 35,150 |
-| Auto-approved | 9,363 |
-| Pending review | 10,520 |
-| Auto-rejected | 18,656 |
+| Stage 0 resolved | 3,441 |
+| Auto-approved | 8,350 |
+| Pending review | 12,001 |
+| Auto-rejected | 18,173 |
+| Avg confidence | 0.639 |
 
 ---
 

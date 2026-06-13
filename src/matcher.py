@@ -175,6 +175,8 @@ class ProductMatcher:
                 embedding_score=embedding_score,
                 brand_match=brand_match,
                 weight_match=weight_match,
+                query_clean=query,
+                candidate_clean=candidate_clean,
                 product_kind=query_kind,
                 query_brand=query_brand,
                 candidate_brand=candidate_brand,
@@ -187,6 +189,8 @@ class ProductMatcher:
                     "tfidf_score": tfidf_score,
                     "embedding_score": embedding_score,
                     "confidence_score": confidence_score,
+                    "brand_match": brand_match,
+                    "weight_match": weight_match,
                 }
             )
 
@@ -214,7 +218,13 @@ class ProductMatcher:
                 "confidence_label": get_confidence_label(confidence_score),
                 "confidence_color": get_confidence_color(confidence_score),
                 "explanation": explanation,
-                "triage": triage(confidence_score),
+                "triage": triage(
+                    confidence_score,
+                    item.get("brand_match") is True,
+                    item.get("weight_match") is True,
+                    query,
+                    item["name_clean"],
+                ),
             }
             if set(hit.keys()) != MATCH_RESULT_KEYS:
                 raise RuntimeError(f"Match result missing keys: {MATCH_RESULT_KEYS - set(hit.keys())}")

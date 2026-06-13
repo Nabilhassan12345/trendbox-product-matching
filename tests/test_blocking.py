@@ -63,7 +63,17 @@ def test_fuzzy_spelling() -> None:
     hits = resolver.resolve("Maydonoz Adet")
     check("returns fuzzy hits", True, hits is not None)
     if hits:
-        check("auto-approve fuzzy single", "auto_approve", triage(hits[0]["confidence_score"]))
+        check(
+            "auto-approve fuzzy single",
+            "auto_approve",
+            triage(
+                hits[0]["confidence_score"],
+                True,
+                False,
+                "maydonoz adet",
+                hits[0]["name_clean"],
+            ),
+        )
 
 
 def test_no_match() -> None:

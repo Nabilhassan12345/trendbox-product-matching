@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 import pandas as pd
 
 from src.confidence import get_confidence_color, get_confidence_label, triage
-from src.preprocess import extract_weight, normalize
+from src.preprocess import extract_brand, extract_weight, normalize
 from src.reference_catalog import build_barcode_lookup, build_name_to_barcodes
 
 logger = logging.getLogger(__name__)
@@ -173,6 +173,17 @@ class Stage0Resolver:
             )
 
         label = get_confidence_label(confidence)
+        candidate_clean = str(ref["name_clean"])
+        brand_match = bool(
+            extract_brand(query)
+            and extract_brand(candidate_clean)
+            and extract_brand(query) == extract_brand(candidate_clean)
+        )
+        weight_match = bool(
+            extract_weight(query)
+            and extract_weight(candidate_clean)
+            and extract_weight(query) == extract_weight(candidate_clean)
+        )
         hit = {
             "rank": 1,
             "barcode": barcode,
@@ -184,6 +195,12 @@ class Stage0Resolver:
             "confidence_label": label,
             "confidence_color": get_confidence_color(confidence),
             "explanation": explanation,
-            "triage": triage(confidence),
+            "triage": triage(
+                confidence,
+                brand_match,
+                weight_match,
+                query,
+                candidate_clean,
+            ),
         }
         return [hit]

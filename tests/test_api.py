@@ -34,7 +34,7 @@ def _make_hit(rank: int, barcode: str, name: str, confidence: float) -> dict:
         "confidence_label": get_confidence_label(confidence),
         "confidence_color": get_confidence_color(confidence),
         "explanation": f"Mock explanation for {name}",
-        "triage": triage(confidence),
+        "triage": triage(confidence, False, False, "", ""),
     }
 
 

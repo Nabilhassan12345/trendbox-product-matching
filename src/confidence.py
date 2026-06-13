@@ -4,18 +4,20 @@ from __future__ import annotations
 
 from typing import Optional
 
+from rapidfuzz import fuzz
+
+from src.preprocess import extract_weight
+
 ProductKind = str  # "branded" | "fresh" | "unknown"
 
 # Weighted blend of Stage 1 (TF-IDF) and Stage 2 (embedding) scores.
 #
-# Tuning note: evaluation on held-out same-barcode spelling variants
-# (scripts/evaluate.py) showed the multilingual embedding model assigns very
-# high similarity (0.92–0.98) to brand/size/flavour-swapped near-duplicates,
-# overriding the correct barcode. Character-level TF-IDF is the stronger signal
-# for *exact* product identity on this catalogue, so the blend favours it and
-# explicit brand/weight *mismatch* penalties demote near-duplicates.
-TFIDF_WEIGHT = 0.5
-EMBEDDING_WEIGHT = 0.5
+# Recall@1 on held-out spelling variants (~500 queries): TF-IDF ~60%, embedding ~48%.
+# Favour TF-IDF in the blend so rank-1 follows the stronger identity signal; embeddings
+# still contribute semantic signal without overriding spelling matches.
+TFIDF_WEIGHT = 0.40
+EMBEDDING_WEIGHT = 0.40
+FUZZY_WEIGHT = 0.20
 
 # Exact-match bonuses applied on top of the blended base score.
 BRAND_MATCH_BONUS = 0.05
@@ -23,12 +25,13 @@ WEIGHT_MATCH_BONUS = 0.05
 
 # Mismatch penalties: a different brand or pack size almost always means a
 # different barcode, so penalise these much more strongly than the match bonus.
-BRAND_MISMATCH_PENALTY = 0.30
-WEIGHT_MISMATCH_PENALTY = 0.20
+BRAND_MISMATCH_PENALTY = 0.20
+WEIGHT_MISMATCH_PENALTY = 0.15
 
 # Confidence band thresholds (aligned with project auto-triage rules).
 HIGH_THRESHOLD = 0.90
 MEDIUM_THRESHOLD = 0.60
+BRAND_REVIEW_LOW = 0.45
 
 # UI colour tokens for Streamlit review pages.
 COLOR_HIGH = "#2ECC71"
@@ -64,6 +67,17 @@ def _edit_distance_leq(a: str, b: str, max_distance: int) -> bool:
     return previous[-1] <= max_distance
 
 
+def fuzzy_score(a: str, b: str) -> float:
+    """Return token-sort fuzzy similarity in ``[0.0, 1.0]``.
+
+    ``token_sort_ratio`` tokenises both strings, sorts tokens alphabetically,
+    then compares — so Turkish product names that differ only in word order
+    (e.g. ``"ulker cikolata 150 g"`` vs ``"150 g ulker cikolata"``) score
+    much higher than ``fuzz.ratio``, which is order-sensitive.
+    """
+    return fuzz.token_sort_ratio(a, b) / 100.0
+
+
 def resolve_brand_match(
     query_brand: str,
     candidate_brand: str,
@@ -86,6 +100,8 @@ def compute_confidence(
     embedding_score: float,
     brand_match: Optional[bool],
     weight_match: Optional[bool],
+    query_clean: str,
+    candidate_clean: str,
     product_kind: ProductKind = "unknown",
     query_brand: str = "",
     candidate_brand: str = "",
@@ -107,6 +123,8 @@ def compute_confidence(
             is unknown (neutral).
         weight_match: ``True`` / ``False`` / ``None`` for weight/volume, with the
             same meaning as ``brand_match``.
+        query_clean: Normalised query product name (for fuzzy string similarity).
+        candidate_clean: Normalised candidate product name.
         product_kind: ``branded``, ``fresh``, or ``unknown`` — adjusts brand penalties.
         query_brand: Optional explicit query brand token (overrides *brand_match* when set).
         candidate_brand: Optional candidate brand token.
@@ -122,16 +140,27 @@ def compute_confidence(
     # use of tfidf_score_adjusted which can exceed 1.0 after Stage-1 bonuses).
     tfidf_clamped = max(0.0, min(1.0, tfidf_score))
     embedding_clamped = max(0.0, min(1.0, embedding_score))
-    base = (tfidf_clamped * TFIDF_WEIGHT) + (embedding_clamped * EMBEDDING_WEIGHT)
+    fuzzy = fuzzy_score(query_clean, candidate_clean)
+    base = (
+        (tfidf_clamped * TFIDF_WEIGHT)
+        + (embedding_clamped * EMBEDDING_WEIGHT)
+        + (fuzzy * FUZZY_WEIGHT)
+    )
 
     if brand_match is True:
         base += BRAND_MATCH_BONUS
     elif brand_match is False:
         base -= BRAND_MISMATCH_PENALTY
 
-    if weight_match is True:
+    query_weight = extract_weight(query_clean)
+    candidate_weight = extract_weight(candidate_clean)
+    if query_weight and candidate_weight and query_weight == candidate_weight:
         base += WEIGHT_MATCH_BONUS
-    elif weight_match is False:
+    elif not query_weight and not candidate_weight:
+        pass
+    elif not query_weight or not candidate_weight:
+        pass
+    else:
         base -= WEIGHT_MISMATCH_PENALTY
 
     return max(0.0, min(1.0, base))
@@ -171,19 +200,48 @@ def get_confidence_color(score: float) -> str:
     return COLOR_LOW
 
 
-def triage(score: float) -> str:
-    """Return the pipeline action for a confidence score.
+def triage(
+    confidence: float,
+    brand_match: bool,
+    weight_match: bool,
+    query_clean: str,
+    candidate_clean: str,
+) -> str:
+    """Return the pipeline action for a ranked match.
+
+    Rules are applied in order:
+
+    1. **Exact normalized name** — when ``query_clean`` equals ``candidate_clean``
+       after stripping, the product is a perfect string match and is always
+       auto-approved regardless of score.
+
+    2. **Brand-agrees, low-confidence band** — when the brand tokens match and
+       confidence is in ``[0.45, 0.60)``, send to review instead of auto-reject
+       so an operator can quickly verify (brand extraction is imperfect on
+       Turkish data; same-brand near-misses should not be discarded).
+
+    3. **Standard thresholds** — ``≥ 0.90`` auto-approve, ``≥ 0.60`` review,
+       otherwise auto-reject.
 
     Args:
-        score: Confidence value in ``[0.0, 1.0]``.
+        confidence: Ensemble confidence in ``[0.0, 1.0]``.
+        brand_match: ``True`` when query and candidate share the same brand token.
+        weight_match: Reserved for future triage rules (passed through for callers).
+        query_clean: Normalised unmatched product name.
+        candidate_clean: Normalised reference candidate name.
 
     Returns:
         ``"auto_approve"``, ``"review"``, or ``"auto_reject"``.
     """
-    label = get_confidence_label(score)
-    if label == "HIGH":
+    if query_clean.strip() == candidate_clean.strip():
         return "auto_approve"
-    if label == "MEDIUM":
+
+    if brand_match and BRAND_REVIEW_LOW <= confidence < MEDIUM_THRESHOLD:
+        return "review"
+
+    if confidence >= HIGH_THRESHOLD:
+        return "auto_approve"
+    if confidence >= MEDIUM_THRESHOLD:
         return "review"
     return "auto_reject"
 
@@ -213,9 +271,9 @@ if __name__ == "__main__":
         return {True: "Y", False: "N", None: "-"}[value]  # type: ignore[index]
 
     for tfidf, embed, brand, weight, desc in test_cases:
-        score = compute_confidence(tfidf, embed, brand, weight)
+        score = compute_confidence(tfidf, embed, brand, weight, "", "")
         label = get_confidence_label(score)
-        action = triage(score)
+        action = triage(score, brand is True, weight is True, "", "")
         color = get_confidence_color(score)
         print(
             f"{desc:<40} {tfidf:>7.2f} {embed:>7.2f} "
@@ -228,7 +286,7 @@ if __name__ == "__main__":
     for s in boundaries:
         print(
             f"  score={s:.2f}  label={get_confidence_label(s):>6}  "
-            f"triage={triage(s):>14}  color={get_confidence_color(s)}"
+            f"triage={triage(s, False, False, '', ''):>14}  color={get_confidence_color(s)}"
         )
 
     print("\nAll tests complete.")

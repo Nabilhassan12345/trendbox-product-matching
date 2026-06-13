@@ -28,7 +28,7 @@ from src.database import (
     get_session,
     replace_matches,
 )
-from src.preprocess import normalize, normalize_batch
+from src.preprocess import extract_brand, extract_weight, normalize, normalize_batch
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +39,38 @@ _PRIMARY_STATUS = {
 }
 
 
-def primary_status(confidence_score: float) -> str:
-    """Map a rank-1 confidence score to the product-level match status."""
-    return _PRIMARY_STATUS[triage(confidence_score)]
+def _match_state(query_value: str, candidate_value: str) -> bool:
+    """Return True when both sides are present and equal."""
+    return bool(query_value and candidate_value and query_value == candidate_value)
+
+
+def primary_status(primary_hit: Dict[str, Any], query_clean: str) -> str:
+    """Map a rank-1 hit to the product-level match status."""
+    candidate_clean = str(primary_hit.get("name_clean", ""))
+    brand_match = _match_state(
+        extract_brand(query_clean),
+        extract_brand(candidate_clean),
+    )
+    weight_match = _match_state(
+        extract_weight(query_clean),
+        extract_weight(candidate_clean),
+    )
+    return _PRIMARY_STATUS[
+        triage(
+            float(primary_hit["confidence_score"]),
+            brand_match,
+            weight_match,
+            query_clean,
+            candidate_clean,
+        )
+    ]
 
 
 def build_records_for_product(
     hits: Sequence[Dict[str, Any]],
     unmatched_product_id: int,
     barcode_to_id: Dict[str, int],
+    query_clean: str = "",
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Build persistable match rows for a single unmatched product.
 
@@ -74,7 +97,7 @@ def build_records_for_product(
         return [], None
 
     primary_hit = resolved[0][0]
-    product_status = primary_status(primary_hit["confidence_score"])
+    product_status = primary_status(primary_hit, query_clean)
     sibling_status = (
         STATUS_ALTERNATIVE if product_status == STATUS_PENDING else STATUS_SUPERSEDED
     )
@@ -154,11 +177,11 @@ def process_unmatched(
         for index, hits in zip(unresolved_indices, ml_results):
             all_hits[index] = hits
 
-    for (product_id, _), hits in zip(unmatched_products, all_hits):
+    for (product_id, _), query, hits in zip(unmatched_products, queries, all_hits):
         if not hits:
             continue
         product_records, status = build_records_for_product(
-            hits, product_id, barcode_to_id
+            hits, product_id, barcode_to_id, query_clean=query
         )
         records.extend(product_records)
         if status == STATUS_PENDING:

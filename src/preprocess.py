@@ -69,11 +69,53 @@ def _standardize_units(text: str) -> str:
     return _UNIT_PATTERN.sub(_replace, text)
 
 
+NOISE_WORDS = {
+    "ve",
+    "ile",
+    "icin",
+    "paket",
+    "pk",
+    "kutu",
+    "koli",
+    "no",
+    "num",
+    "the",
+    "and",
+    "with",
+    "von",
+    "de",
+    "li",
+    "lu",
+    "lü",
+    "lı",
+    "ci",
+    "cu",
+    "cü",
+    "cı",
+    "si",
+    "su",
+    "sü",
+    "sı",
+}
+
+
+def remove_noise(text: str) -> str:
+    """
+    Remove common noise words that appear across
+    many products and dilute TF-IDF signal.
+    Only removes standalone words, not substrings.
+    """
+    words = text.split()
+    cleaned = [w for w in words if w not in NOISE_WORDS]
+    # Never return empty string
+    return " ".join(cleaned) if cleaned else text
+
+
 def normalize(text: str) -> str:
     """Normalise a single Turkish product name for matching.
 
     Steps: lowercase, strip, Turkish character folding, unit standardisation,
-    remove non-alphanumeric characters, collapse whitespace.
+    remove non-alphanumeric characters, collapse whitespace, remove noise words.
 
     Args:
         text: Raw product name.
@@ -90,7 +132,7 @@ def normalize(text: str) -> str:
     cleaned = _standardize_units(cleaned)
     cleaned = _NON_ALNUM_SPACE.sub(" ", cleaned)
     cleaned = _MULTI_SPACE.sub(" ", cleaned).strip()
-    return cleaned
+    return remove_noise(cleaned)
 
 
 def normalize_batch(names: List[str]) -> List[str]:
@@ -163,7 +205,16 @@ def classify_product_kind(
 
 
 def extract_weight(name: str) -> str:
-    """Extract a weight/volume phrase such as ``'400 g'`` or ``'1 kg'``.
+    """Extract weight/unit signal from product name.
+
+    Returns a standardized string or empty string.
+
+    Examples:
+        ``'Nutella 400gr'`` → ``'400 g'``
+        ``'Dana But Biftek Kg'`` → ``'kg'``
+        ``'Avokado Adet'`` → ``'adet'``
+        ``'Maydonoz Demet'`` → ``'demet'``
+        ``'Random Product'`` → ``''``
 
     Accepts all unit variants handled by :func:`normalize` — ``gr``, ``gram``,
     ``g``, ``kg``, ``ml``, ``lt``, ``l``, and ``litre`` — on raw or cleaned
@@ -173,18 +224,34 @@ def extract_weight(name: str) -> str:
         name: Product name (raw or normalised).
 
     Returns:
-        Canonical ``'<number> <unit>'`` string, or empty if not found.
+        Canonical ``'<number> <unit>'`` for weighed products, a bare unit token
+        for unit-priced fresh items (``kg``, ``adet``, …), or empty if not found.
     """
     if not name or not isinstance(name, str):
         return ""
 
     match = _UNIT_PATTERN.search(name)
-    if not match:
-        return ""
+    if match:
+        number = match.group(1).replace(",", ".")
+        raw_unit = match.group(2).lower().strip()
+        if raw_unit in ("lt", "l", "litre"):
+            return f"{number} lt"
+        unit = _canonical_unit(match.group(2))
+        return f"{number} {unit}"
 
-    number = match.group(1).replace(",", ".")
-    unit = _canonical_unit(match.group(2))
-    return f"{number} {unit}"
+    name_lower = name.lower().strip()
+    unit_endings = {
+        "kg": "kg",
+        "adet": "adet",
+        "demet": "demet",
+        "litre": "lt",
+        "lt": "lt",
+        "deste": "deste",
+    }
+    for suffix, unit in unit_endings.items():
+        if name_lower.endswith(f" {suffix}") or f" {suffix} " in name_lower:
+            return unit
+    return ""
 
 
 def enrich_dataframe(df: pd.DataFrame) -> pd.DataFrame:

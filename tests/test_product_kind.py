@@ -54,9 +54,13 @@ def test_maydonoz_confidence() -> None:
         embedding_score=0.7524,
         brand_match=False,
         weight_match=None,
+        query_clean=normalize("maydonoz adet"),
+        candidate_clean=normalize("maydanoz adet"),
         product_kind="fresh",
         query_brand="maydonoz",
         candidate_brand="maydanoz",
     )
-    check("score enters review band", "review", triage(score))
+    check("score enters review band", "review", triage(
+        score, False, False, normalize("maydonoz adet"), normalize("maydanoz adet")
+    ))
     check("score above 0.60", True, score >= 0.60)
