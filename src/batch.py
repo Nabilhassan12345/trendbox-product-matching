@@ -28,6 +28,7 @@ from src.database import (
     get_session,
     replace_matches,
 )
+from src.match_quality import SIZE_CONFLICT, classify_pack_from_names, pack_label_from_name
 from src.preprocess import extract_brand, extract_weight, normalize, normalize_batch
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,31 @@ _PRIMARY_STATUS = {
 def _match_state(query_value: str, candidate_value: str) -> bool:
     """Return True when both sides are present and equal."""
     return bool(query_value and candidate_value and query_value == candidate_value)
+
+
+def _quality_fields_for_hit(hit: Dict[str, Any], query_clean: str) -> Dict[str, Any]:
+    """Derive persisted match-quality metadata from a hit and query name."""
+    candidate_clean = str(hit.get("name_clean", ""))
+    query_weight = str(hit.get("query_weight") or pack_label_from_name(query_clean) or extract_weight(query_clean))
+    suggested_weight = str(
+        hit.get("suggested_weight") or pack_label_from_name(candidate_clean) or extract_weight(candidate_clean)
+    )
+    size_verdict = str(hit.get("size_verdict") or classify_pack_from_names(query_clean, candidate_clean))
+    brand_match = hit.get("brand_match")
+    if brand_match is None:
+        query_brand = extract_brand(query_clean)
+        candidate_brand = extract_brand(candidate_clean)
+        if not query_brand or not candidate_brand:
+            brand_match = None
+        else:
+            brand_match = query_brand == candidate_brand
+    return {
+        "query_weight": query_weight or None,
+        "suggested_weight": suggested_weight or None,
+        "size_verdict": size_verdict,
+        "brand_match": brand_match,
+        "guardrail_applied": size_verdict == SIZE_CONFLICT,
+    }
 
 
 def primary_status(primary_hit: Dict[str, Any], query_clean: str) -> str:
@@ -105,6 +131,7 @@ def build_records_for_product(
     records: List[Dict[str, Any]] = []
     for hit, suggested_id in resolved:
         status = product_status if hit is primary_hit else sibling_status
+        quality = _quality_fields_for_hit(hit, query_clean)
         records.append(
             {
                 "unmatched_product_id": unmatched_product_id,
@@ -115,6 +142,7 @@ def build_records_for_product(
                 "confidence_label": hit["confidence_label"],
                 "rank": hit["rank"],
                 "status": status,
+                **quality,
             }
         )
     return records, product_status

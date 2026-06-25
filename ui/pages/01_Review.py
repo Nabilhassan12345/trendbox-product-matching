@@ -445,14 +445,43 @@ render_section_header(
     "Source product on the left · ranked suggestions on the right.",
 )
 
-left_col, right_col = st.columns([2, 3], gap="large")
-
 product_name = current.get("product_name", "")
 product_id = current.get("product_id", "")
 brand = current.get("brand") or ""
 weight = current.get("weight") or ""
 product_kind = current.get("product_kind", "unknown")
+size_verdict = current.get("size_verdict") or ""
+query_weight_q = current.get("query_weight") or weight
+suggested_weight_q = current.get("suggested_weight") or ""
 suggestions = [s for s in current.get("suggestions", []) if s.get("match_id")][:3]
+if not suggested_weight_q and suggestions:
+    suggested_weight_q = suggestions[0].get("suggested_weight") or ""
+
+if size_verdict == "size_conflict":
+    src_w = query_weight_q or "unknown"
+    sug_w = suggested_weight_q or "unknown"
+    st.markdown(
+        f"""
+        <div style="background:#FFFBEB; border:1px solid #FCD34D; border-radius:10px;
+                    padding:12px 16px; margin-bottom:16px;">
+          <span style="font-size:14px; font-weight:600; color:#92400E;">
+            Pack mismatch — source {src_w} vs suggestion {sug_w}
+          </span>
+          <div style="font-size:12px; color:#B45309; margin-top:6px;">
+            Compares unit weight, pack count, and multipack totals when present.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+elif size_verdict == "size_verified":
+    st.markdown(
+        '<div style="font-size:13px; color:#059669; margin-bottom:12px;">'
+        "Pack size verified</div>",
+        unsafe_allow_html=True,
+    )
+
+left_col, right_col = st.columns([2, 3], gap="large")
 
 # De-duplicate by barcode
 seen_barcodes: set[str] = set()

@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import func
 
 from api.schemas import (
@@ -27,6 +29,11 @@ from api.schemas import (
     MatchResponse,
     MatchSuggestion,
     PipelineStats,
+    QualityMatchRow,
+    QualityMatchesResponse,
+    QualityResolveRequest,
+    QualityResolveResponse,
+    QualitySummaryResponse,
     RecentDecisionRow,
     DailyOutcomePoint,
     RecentMatchRow,
@@ -38,17 +45,21 @@ from src.confidence import HIGH_THRESHOLD, MEDIUM_THRESHOLD, get_confidence_colo
 from src.config import CATALOG_PROFILE_PATH, ROOT, TOP_SUGGESTIONS
 from src.database import (
     OPEN_STATUSES,
+    STATUS_ALTERNATIVE,
     STATUS_APPROVED,
     STATUS_AUTO_APPROVED,
     STATUS_AUTO_REJECTED,
     STATUS_PENDING,
     STATUS_REJECTED,
+    STATUS_SUPERSEDED,
     Decision,
     Match,
     Product,
     get_confidence_scores,
     get_daily_outcome_counts,
     get_pipeline_stats,
+    get_quality_matches,
+    get_quality_summary,
     get_recent_activity,
     get_recent_decisions,
     get_recent_matches_by_outcome,
@@ -59,10 +70,137 @@ from src.database import (
     save_decision,
 )
 from src.match_metadata import explanation_from_stored, infer_match_source
+from src.match_quality import SIZE_CONFLICT, SIZE_UNKNOWN, SIZE_VERIFIED
 from src.matcher import ProductMatcher
 from src.preprocess import classify_product_kind
 
 logger = logging.getLogger(__name__)
+
+VALID_QUALITY_VERDICTS = frozenset({SIZE_VERIFIED, SIZE_CONFLICT, SIZE_UNKNOWN})
+VALID_QUALITY_STATUSES = frozenset(
+    {
+        STATUS_PENDING,
+        STATUS_AUTO_APPROVED,
+        STATUS_AUTO_REJECTED,
+        STATUS_APPROVED,
+        STATUS_REJECTED,
+        STATUS_ALTERNATIVE,
+        STATUS_SUPERSEDED,
+    }
+)
+MAX_QUALITY_PAGE = 200
+MAX_QUALITY_EXPORT = 10_000
+
+def _parse_quality_verdict(verdict: str) -> str:
+    """Validate size verdict query param."""
+    normalized = verdict.lower().strip()
+    if normalized not in VALID_QUALITY_VERDICTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"verdict must be one of {sorted(VALID_QUALITY_VERDICTS)}",
+        )
+    return normalized
+
+
+def _parse_quality_status_filter(status: str | None) -> list[str] | None:
+    """Parse comma-separated match status filters."""
+    if not status or not status.strip():
+        return None
+    values = [item.strip() for item in status.split(",") if item.strip()]
+    invalid = [item for item in values if item not in VALID_QUALITY_STATUSES]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid status value(s): {invalid}",
+        )
+    return values
+
+
+def _clamp_quality_limit(limit: int) -> int:
+    """Clamp paginated list/export page size."""
+    return max(1, min(limit, MAX_QUALITY_PAGE))
+
+
+def _build_quality_match_rows(raw_rows: list[dict[str, Any]]) -> list[QualityMatchRow]:
+    """Map database rows to API schema objects."""
+    return [QualityMatchRow(**row) for row in raw_rows]
+
+
+def _iter_quality_csv(
+    verdict: str,
+    status_filter: list[str] | None,
+) -> Iterator[str]:
+    """Stream audit-friendly CSV rows for quality matches."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    headers = [
+        "match_id",
+        "status",
+        "confidence_score",
+        "size_verdict",
+        "guardrail_applied",
+        "query_product_id",
+        "query_product_name",
+        "query_weight",
+        "suggested_product_id",
+        "suggested_product_name",
+        "suggested_barcode",
+        "suggested_weight",
+        "match_source",
+        "tfidf_score",
+        "embedding_score",
+        "created_at",
+    ]
+    writer.writerow(headers)
+    yield output.getvalue()
+    output.seek(0)
+    output.truncate(0)
+
+    offset = 0
+    exported = 0
+    while exported < MAX_QUALITY_EXPORT:
+        batch_limit = min(MAX_QUALITY_PAGE, MAX_QUALITY_EXPORT - exported)
+        rows, total = get_quality_matches(
+            verdict,
+            status=status_filter,
+            limit=batch_limit,
+            offset=offset,
+        )
+        if not rows:
+            break
+        for row in rows:
+            query = row["query_product"]
+            suggested = row["suggested_product"]
+            writer.writerow(
+                [
+                    row["match_id"],
+                    row["status"],
+                    row["confidence_score"],
+                    row["size_verdict"],
+                    row["guardrail_applied"],
+                    query["id"],
+                    query["name"],
+                    query.get("weight") or "",
+                    suggested["id"],
+                    suggested["name"],
+                    suggested.get("barcode") or "",
+                    suggested.get("weight") or "",
+                    row["match_source"],
+                    row["tfidf_score"],
+                    row["embedding_score"],
+                    row.get("created_at") or "",
+                ]
+            )
+        chunk = output.getvalue()
+        output.seek(0)
+        output.truncate(0)
+        if chunk:
+            yield chunk
+        exported += len(rows)
+        offset += len(rows)
+        if offset >= total:
+            break
+
 
 # Load variables from a local .env file if present (no-op when absent; never
 # overrides values already set in the environment, e.g. by pipeline.py or tests).
@@ -253,15 +391,22 @@ def _build_match_response(unmatched_product_id: int) -> MatchResponse:
                 match_source=source,
                 tfidf_score=tfidf,
                 embedding_score=embedding,
+                size_verdict=row.get("size_verdict") or SIZE_UNKNOWN,
+                query_weight=row.get("query_weight"),
+                suggested_weight=row.get("suggested_weight"),
             )
         )
 
+    primary = pending_matches[0]
     return MatchResponse(
         product_id=unmatched["id"],
         product_name=product_name,
         brand=unmatched.get("brand"),
         weight=unmatched.get("weight"),
         product_kind=product_kind,
+        size_verdict=primary.get("size_verdict") or SIZE_UNKNOWN,
+        query_weight=primary.get("query_weight"),
+        suggested_weight=primary.get("suggested_weight"),
         suggestions=suggestions,
     )
 
@@ -501,6 +646,122 @@ def matches_recent(outcome: str = "approved", limit: int = 50) -> list[RecentMat
         return _build_recent_match_rows(outcome, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/quality/summary", response_model=QualitySummaryResponse)
+def quality_summary() -> QualitySummaryResponse:
+    """Return aggregate rank-1 size-verdict and guardrail metrics."""
+    return QualitySummaryResponse(**get_quality_summary())
+
+
+@app.get("/quality/matches", response_model=QualityMatchesResponse)
+def quality_matches(
+    verdict: str,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> QualityMatchesResponse:
+    """Return paginated rank-1 matches for a size verdict band."""
+    normalized_verdict = _parse_quality_verdict(verdict)
+    status_filter = _parse_quality_status_filter(status)
+    page_limit = _clamp_quality_limit(limit)
+    page_offset = max(0, offset)
+
+    try:
+        rows, total = get_quality_matches(
+            normalized_verdict,
+            status=status_filter,
+            limit=page_limit,
+            offset=page_offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return QualityMatchesResponse(
+        items=_build_quality_match_rows(rows),
+        total=total,
+        limit=page_limit,
+        offset=page_offset,
+        verdict=normalized_verdict,  # type: ignore[arg-type]
+    )
+
+
+_QUALITY_RESOLVE_REJECT_STATUSES = frozenset({STATUS_PENDING, STATUS_ALTERNATIVE})
+
+
+def _validate_quality_resolve_target(match_id: int, action: str) -> None:
+    """Ensure a match exists and is eligible for a quality resolve action."""
+    with get_session() as session:
+        match = session.get(Match, match_id)
+        if match is None:
+            raise HTTPException(status_code=404, detail=f"Match id={match_id} not found")
+        if match.rank != 1:
+            raise HTTPException(
+                status_code=422,
+                detail="Only rank-1 matches can be resolved via quality actions",
+            )
+        if action == "reject" and match.status not in _QUALITY_RESOLVE_REJECT_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Reject requires pending or alternative status, got {match.status!r}"
+                ),
+            )
+        if action == "reopen" and match.status != STATUS_AUTO_REJECTED:
+            raise HTTPException(
+                status_code=422,
+                detail="Reopen requires auto_rejected status",
+            )
+
+
+@app.post("/quality/matches/{match_id}/resolve", response_model=QualityResolveResponse)
+def quality_resolve_match(
+    match_id: int,
+    body: QualityResolveRequest,
+) -> QualityResolveResponse:
+    """Reject or reopen a rank-1 match flagged by size-quality guardrails."""
+    action = body.action.lower().strip()
+    if action not in {"reject", "reopen"}:
+        raise HTTPException(status_code=422, detail="action must be 'reject' or 'reopen'")
+
+    _validate_quality_resolve_target(match_id, action)
+
+    try:
+        if action == "reject":
+            save_decision(match_id, "rejected", note=body.note or "")
+        else:
+            reopen_auto_rejected(match_id)
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=422, detail=message) from exc
+    except Exception as exc:
+        logger.exception("Failed quality resolve match_id=%s action=%s", match_id, action)
+        raise HTTPException(status_code=500, detail="Failed to resolve quality match") from exc
+
+    return QualityResolveResponse(
+        success=True,
+        match_id=match_id,
+        action=action,
+        next_pending_count=_pending_review_count(),
+    )
+
+
+@app.get("/quality/export")
+def quality_export(
+    verdict: str,
+    status: str | None = None,
+) -> StreamingResponse:
+    """Download audit-friendly CSV for matches in a size verdict band."""
+    normalized_verdict = _parse_quality_verdict(verdict)
+    status_filter = _parse_quality_status_filter(status)
+    filename = f"quality_{normalized_verdict}.csv"
+    return StreamingResponse(
+        _iter_quality_csv(normalized_verdict, status_filter),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/batch_process", response_model=BatchProcessResponse)

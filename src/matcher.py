@@ -16,7 +16,14 @@ from src.confidence import (
     triage,
 )
 from src.embedding_reranker import DEFAULT_EMBEDDINGS_PATH, EmbeddingReranker
-from src.preprocess import classify_product_kind, extract_brand, extract_weight, normalize
+from src.match_quality import classify_pack_from_names, pack_label_from_name
+from src.preprocess import (
+    classify_product_kind,
+    extract_brand,
+    extract_weight,
+    filter_candidates_by_weight,
+    normalize,
+)
 from src.tfidf_retriever import TFIDFRetriever
 
 logger = logging.getLogger(__name__)
@@ -47,6 +54,10 @@ MATCH_RESULT_KEYS = frozenset(
         "confidence_color",
         "explanation",
         "triage",
+        "query_weight",
+        "suggested_weight",
+        "size_verdict",
+        "brand_match",
     }
 )
 
@@ -129,6 +140,7 @@ class ProductMatcher:
             return []
 
         candidates = self.tfidf.search(query, top_k=TOP_K_TFIDF)
+        candidates = filter_candidates_by_weight(query, candidates)
         if candidates.empty:
             return []
 
@@ -165,6 +177,8 @@ class ProductMatcher:
             candidate_clean = row.name_clean if hasattr(row, "name_clean") else normalize(row.name)
             candidate_brand = extract_brand(candidate_clean)
             candidate_weight = extract_weight(candidate_clean)
+            query_pack_label = pack_label_from_name(query)
+            candidate_pack_label = pack_label_from_name(candidate_clean)
             brand_match = _match_state(query_brand, candidate_brand)
             weight_match = _match_state(query_weight, candidate_weight)
 
@@ -191,6 +205,9 @@ class ProductMatcher:
                     "confidence_score": confidence_score,
                     "brand_match": brand_match,
                     "weight_match": weight_match,
+                    "query_weight": query_pack_label or query_weight,
+                    "suggested_weight": candidate_pack_label or candidate_weight,
+                    "size_verdict": classify_pack_from_names(query, candidate_clean),
                 }
             )
 
@@ -225,6 +242,10 @@ class ProductMatcher:
                     query,
                     item["name_clean"],
                 ),
+                "query_weight": item["query_weight"],
+                "suggested_weight": item["suggested_weight"],
+                "size_verdict": item["size_verdict"],
+                "brand_match": item["brand_match"],
             }
             if set(hit.keys()) != MATCH_RESULT_KEYS:
                 raise RuntimeError(f"Match result missing keys: {MATCH_RESULT_KEYS - set(hit.keys())}")
@@ -284,7 +305,7 @@ class ProductMatcher:
             tfidf_results = self.tfidf.batch_search(chunk_queries, top_k=TOP_K_TFIDF)
 
             for (global_idx, query), query_vec in zip(chunk, query_vecs):
-                candidates = tfidf_results[query]
+                candidates = filter_candidates_by_weight(query, tfidf_results[query])
                 if candidates.empty:
                     continue
                 embedding_scores = self.embedder.candidate_scores(query_vec, candidates)

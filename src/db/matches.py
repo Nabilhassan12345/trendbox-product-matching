@@ -48,6 +48,11 @@ def _records_from_dicts(matches: List[Dict[str, Any]]) -> List[Match]:
                 confidence_label=str(item["confidence_label"]),
                 rank=int(item["rank"]),
                 status=str(item["status"]),
+                query_weight=item.get("query_weight"),
+                suggested_weight=item.get("suggested_weight"),
+                size_verdict=item.get("size_verdict"),
+                brand_match=item.get("brand_match"),
+                guardrail_applied=bool(item.get("guardrail_applied", False)),
             )
         )
     return records

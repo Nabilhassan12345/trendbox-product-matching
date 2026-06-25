@@ -36,6 +36,7 @@ inject_styles()
 
 health, health_offline = api_get("/health", timeout=5)
 stats, stats_offline = api_get("/stats", timeout=5)
+quality_summary, _quality_offline = api_get("/quality/summary", timeout=5)
 
 if health_offline or stats_offline:
     st.markdown(
@@ -58,6 +59,9 @@ avg_confidence = float(_s.get("avg_confidence", 0.0))
 unmatched = int(_s.get("unmatched", 0))
 matched_count = int(_s.get("matched", 0))
 total_products = int(_s.get("total_products", products_indexed))
+_quality = quality_summary or {}
+_integrity_pct = float(_quality.get("catalog_integrity_pct", 0.0)) * 100.0
+_size_conflicts = int(_quality.get("size_conflict_count", 0))
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -225,6 +229,7 @@ render_divider()
 def _render_pipeline_snapshot() -> None:
     """Pipeline snapshot cards — polls /catalog/profile every fragment run."""
     catalog_profile, catalog_offline = api_get("/catalog/profile", timeout=10)
+    quality_live, _ = api_get("/quality/summary", timeout=10)
     _profile = (catalog_profile or {}).get("profile") or {}
     _pipeline = (catalog_profile or {}).get("pipeline_stats") or {}
     _live = (catalog_profile or {}).get("live_stats") or {}
@@ -233,6 +238,8 @@ def _render_pipeline_snapshot() -> None:
     _stage0 = int(_pipeline.get("stage0_total", 0))
     _missing_wt = float(_gaps.get("unmatched_missing_weight_pct", 0))
     _pending = int(_live.get("pending", 0))
+    _integrity_live = float((quality_live or {}).get("catalog_integrity_pct", 0.0)) * 100.0
+    _conflicts_live = int((quality_live or {}).get("size_conflict_count", 0))
 
     render_section_header(
         "Pipeline snapshot",
@@ -275,6 +282,8 @@ def _render_pipeline_snapshot() -> None:
         with meta_col:
             st.caption(
                 f"Refreshes every {REFRESH_SECONDS} seconds · "
+                f"Integrity {_integrity_live:.1f}% · "
+                f"{_conflicts_live:,} size conflicts · "
                 f"Last updated: {datetime.now().strftime('%H:%M:%S')}"
             )
 
@@ -306,6 +315,10 @@ st.markdown(
       <div class="stat-item">Unmatched <strong>{unmatched:,}</strong></div>
       <div class="stat-sep"></div>
       <div class="stat-item">Matched <strong>{matched_count:,}</strong></div>
+      <div class="stat-sep"></div>
+      <div class="stat-item">Integrity <strong>{_integrity_pct:.1f}%</strong></div>
+      <div class="stat-sep"></div>
+      <div class="stat-item">Size conflicts <strong>{_size_conflicts:,}</strong></div>
     </div>
     """,
     unsafe_allow_html=True,

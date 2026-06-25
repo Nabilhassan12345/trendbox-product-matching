@@ -32,6 +32,7 @@ from src.db.models import (
     Match,
     Product,
 )
+from src.db.quality import get_quality_matches, get_quality_summary
 from src.db.session import get_session, init_db
 
 __all__ = [
@@ -54,6 +55,8 @@ __all__ = [
     "get_daily_outcome_counts",
     "get_next_pending",
     "get_pipeline_stats",
+    "get_quality_matches",
+    "get_quality_summary",
     "get_recent_activity",
     "get_recent_decisions",
     "get_recent_matches_by_outcome",

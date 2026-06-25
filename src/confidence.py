@@ -6,6 +6,11 @@ from typing import Optional
 
 from rapidfuzz import fuzz
 
+from src.match_quality import (
+    classify_pack_from_names,
+    should_block_auto_approve,
+    size_conflict_triage_action,
+)
 from src.preprocess import extract_weight
 
 ProductKind = str  # "branded" | "fresh" | "unknown"
@@ -215,18 +220,26 @@ def triage(
        after stripping, the product is a perfect string match and is always
        auto-approved regardless of score.
 
-    2. **Brand-agrees, low-confidence band** — when the brand tokens match and
+    2. **Size conflict guardrail** — when both sides have a parsed pack weight and
+       they differ, never auto-approve. Policy from ``TRENDBOX_SIZE_CONFLICT_POLICY``:
+       ``review`` (default) or ``reject``.
+
+    3. **Brand-agrees, low-confidence band** — when the brand tokens match and
        confidence is in ``[0.45, 0.60)``, send to review instead of auto-reject
        so an operator can quickly verify (brand extraction is imperfect on
        Turkish data; same-brand near-misses should not be discarded).
 
-    3. **Standard thresholds** — ``≥ 0.90`` auto-approve, ``≥ 0.60`` review,
+    4. **Standard thresholds** — ``≥ 0.90`` auto-approve, ``≥ 0.60`` review,
        otherwise auto-reject.
+
+    Pack-size verdict is derived from :func:`extract_weight` on ``query_clean`` and
+    ``candidate_clean`` (the ``weight_match`` argument is kept for callers but not
+    used for triage).
 
     Args:
         confidence: Ensemble confidence in ``[0.0, 1.0]``.
         brand_match: ``True`` when query and candidate share the same brand token.
-        weight_match: Reserved for future triage rules (passed through for callers).
+        weight_match: Legacy caller hint; size rules use extracted weights instead.
         query_clean: Normalised unmatched product name.
         candidate_clean: Normalised reference candidate name.
 
@@ -239,6 +252,10 @@ def triage(
         and query_clean.strip() == candidate_clean.strip()
     ):
         return "auto_approve"
+
+    size_verdict = classify_pack_from_names(query_clean, candidate_clean)
+    if should_block_auto_approve(size_verdict):
+        return size_conflict_triage_action()
 
     if brand_match and BRAND_REVIEW_LOW <= confidence < MEDIUM_THRESHOLD:
         return "review"

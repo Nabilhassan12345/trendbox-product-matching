@@ -49,6 +49,10 @@ UI_PORT = int(os.getenv("TRENDBOX_UI_PORT", "8501"))
 API_URL = os.getenv("TRENDBOX_API_URL", f"http://localhost:{API_PORT}")
 TOP_SUGGESTIONS = 3
 
+# ── Match quality guardrails ───────────────────────────────────────────────────
+_raw_size_policy = os.getenv("TRENDBOX_SIZE_CONFLICT_POLICY", "review").lower().strip()
+SIZE_CONFLICT_POLICY = _raw_size_policy if _raw_size_policy in {"review", "reject"} else "review"
+
 UI_APP = ROOT / "ui" / "app.py"
 
 # ── Smoke-test file checklist (pipeline startup + run_all_tests.py) ────────────

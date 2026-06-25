@@ -12,7 +12,7 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from src.preprocess import extract_brand, extract_weight
+from src.preprocess import extract_brand, extract_weight, pack_pool_eligible_from_names
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,51 @@ class TFIDFRetriever:
         """Raise if the retriever has not been fitted yet."""
         if self.matrix is None or self.reference_df is None or self.vectorizer is None:
             raise RuntimeError("TFIDFRetriever is not fitted — call fit() first")
+
+    def _reference_weights(self) -> np.ndarray:
+        """Pack-size token per reference row (catalogue column or parsed from name)."""
+        if "weight" in self.reference_df.columns:
+            return self.reference_df["weight"].fillna("").astype(str).to_numpy()
+        return self.reference_df["name_clean"].apply(extract_weight).to_numpy()
+
+    def _weight_eligible_mask(self, query: str) -> np.ndarray:
+        """Boolean mask of reference rows allowed when the query pack profile is known."""
+        from src.pack_profile import parse_pack_profile
+
+        query_profile = parse_pack_profile(query)
+        if not query_profile.has_comparable_signal():
+            return np.ones(len(self.reference_df), dtype=bool)
+        names = self.reference_df["name_clean"].astype(str).tolist()
+        return np.array(
+            [pack_pool_eligible_from_names(query, name) for name in names],
+            dtype=bool,
+        )
+
+    def _select_top_k_indices(
+        self,
+        adjusted_scores: np.ndarray,
+        query: str,
+        top_k: int,
+    ) -> np.ndarray:
+        """Pick top-k candidate indices, excluding definite pack mismatches."""
+        n = len(adjusted_scores)
+        k = min(top_k, n)
+        if k <= 0:
+            return np.array([], dtype=int)
+
+        from src.pack_profile import parse_pack_profile
+
+        if not parse_pack_profile(query).has_comparable_signal():
+            return np.argpartition(adjusted_scores, -k)[-k:]
+
+        eligible = np.where(self._weight_eligible_mask(query))[0]
+        if len(eligible) == 0:
+            return np.argpartition(adjusted_scores, -k)[-k:]
+
+        eligible_scores = adjusted_scores[eligible]
+        k_eff = min(k, len(eligible))
+        local_top = np.argpartition(eligible_scores, -k_eff)[-k_eff:]
+        return eligible[local_top]
 
     def _apply_bonus_vector(
         self,
@@ -135,8 +180,7 @@ class TFIDFRetriever:
         query_weight = extract_weight(query)
         adjusted_all = self._apply_bonus_vector(base_scores_all, query_brand, query_weight)
 
-        k = min(top_k, len(adjusted_all))
-        candidate_indices = np.argpartition(adjusted_all, -k)[-k:]
+        candidate_indices = self._select_top_k_indices(adjusted_all, query, top_k)
         base_scores = base_scores_all[candidate_indices]
         adjusted_scores = adjusted_all[candidate_indices]
 
@@ -166,7 +210,6 @@ class TFIDFRetriever:
         query_matrix = self.vectorizer.transform(queries)
         similarity_matrix = cosine_similarity(query_matrix, self.matrix)
 
-        k = min(top_k, similarity_matrix.shape[1])
         results: Dict[str, pd.DataFrame] = {}
 
         for row_idx, query in enumerate(queries):
@@ -177,7 +220,9 @@ class TFIDFRetriever:
                 base_scores_all, query_brand, query_weight
             )
 
-            candidate_indices = np.argpartition(adjusted_all, -k)[-k:]
+            candidate_indices = self._select_top_k_indices(
+                adjusted_all, query, top_k
+            )
             base_scores = base_scores_all[candidate_indices]
             adjusted_scores = adjusted_all[candidate_indices]
 

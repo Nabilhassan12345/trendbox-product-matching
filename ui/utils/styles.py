@@ -5,11 +5,14 @@ from __future__ import annotations
 from ui.utils.components import (
     badge_html,
     conf_bar_html,
+    match_quality_chip_html,
     match_source_chip_html,
     product_kind_pill_html,
     progress_bar_html,
     show_offline_card,
     tags_html,
+    weight_pill_html,
+    weight_tone,
 )
 from ui.utils.layout import (
     health_status_label,
@@ -29,6 +32,7 @@ __all__ = [
     "health_status_label",
     "inject_alive_interactions",
     "inject_styles",
+    "match_quality_chip_html",
     "match_source_chip_html",
     "product_kind_pill_html",
     "progress_bar_html",
@@ -40,4 +44,6 @@ __all__ = [
     "section_label",
     "show_offline_card",
     "tags_html",
+    "weight_pill_html",
+    "weight_tone",
 ]

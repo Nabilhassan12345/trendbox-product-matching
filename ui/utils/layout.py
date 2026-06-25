@@ -191,8 +191,8 @@ def render_page_nav(active: str, *, alive: bool = False) -> None:
         inject_alive_interactions()
     st.markdown(PAGE_NAV_CSS, unsafe_allow_html=True)
 
-    logo_col, home_col, review_col, analytics_col, pipeline_col, _ = st.columns(
-        [0.45, 1, 1, 1, 1, 2], gap="small"
+    logo_col, home_col, review_col, analytics_col, pipeline_col, quality_col, _ = st.columns(
+        [0.4, 0.85, 0.85, 0.85, 0.85, 0.85, 1.4], gap="small"
     )
 
     with logo_col:
@@ -206,6 +206,7 @@ def render_page_nav(active: str, *, alive: bool = False) -> None:
         (review_col, "review", "pages/01_Review.py", "Review"),
         (analytics_col, "analytics", "pages/02_Analytics.py", "Analytics"),
         (pipeline_col, "pipeline", "pages/03_Pipeline.py", "Pipeline"),
+        (quality_col, "quality", "pages/04_Quality.py", "Quality"),
     )
     for col, key, path, label in nav_items:
         with col:

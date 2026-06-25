@@ -21,6 +21,9 @@ class MatchSuggestion(BaseModel):
     match_source: Literal["stage0_exact", "stage0_fuzzy", "ml"] = "ml"
     tfidf_score: float = 0.0
     embedding_score: float = 0.0
+    size_verdict: Literal["size_verified", "size_conflict", "size_unknown"] = "size_unknown"
+    query_weight: str | None = None
+    suggested_weight: str | None = None
 
 
 class MatchResponse(BaseModel):
@@ -31,6 +34,9 @@ class MatchResponse(BaseModel):
     brand: str | None = None
     weight: str | None = None
     product_kind: Literal["fresh", "branded", "unknown"] = "unknown"
+    size_verdict: Literal["size_verified", "size_conflict", "size_unknown"] = "size_unknown"
+    query_weight: str | None = None
+    suggested_weight: str | None = None
     suggestions: list[MatchSuggestion]
 
 
@@ -181,3 +187,67 @@ class AnalyticsResponse(BaseModel):
     )
     recent_decisions: list[RecentDecisionRow]
     pipeline_stats: PipelineStats
+
+
+class QualityProductSummary(BaseModel):
+    """Minimal product fields for quality audit rows."""
+
+    id: int
+    name: str
+    weight: str | None = None
+
+
+class QualitySuggestedProductSummary(QualityProductSummary):
+    """Suggested reference product including barcode."""
+
+    barcode: str = ""
+
+
+class QualityMatchRow(BaseModel):
+    """One rank-1 match row for quality inspection."""
+
+    match_id: int
+    status: str
+    confidence_score: float
+    size_verdict: Literal["size_verified", "size_conflict", "size_unknown"]
+    query_product: QualityProductSummary
+    suggested_product: QualitySuggestedProductSummary
+    match_source: Literal["stage0_exact", "stage0_fuzzy", "ml"] = "ml"
+
+
+class QualitySummaryResponse(BaseModel):
+    """Aggregate size-verdict metrics for rank-1 matches."""
+
+    size_verified_count: int
+    size_conflict_count: int
+    size_unknown_count: int
+    catalog_integrity_pct: float = Field(
+        description="verified / (verified + conflict) among rank-1 with known verdict"
+    )
+    guardrail_blocked_count: int
+
+
+class QualityMatchesResponse(BaseModel):
+    """Paginated quality match rows for a single size verdict."""
+
+    items: list[QualityMatchRow]
+    total: int
+    limit: int
+    offset: int
+    verdict: Literal["size_verified", "size_conflict", "size_unknown"]
+
+
+class QualityResolveRequest(BaseModel):
+    """Operator action on a rank-1 quality conflict."""
+
+    action: Literal["reject", "reopen"]
+    note: str | None = None
+
+
+class QualityResolveResponse(BaseModel):
+    """Result of resolving a quality conflict."""
+
+    success: bool
+    match_id: int
+    action: str
+    next_pending_count: int

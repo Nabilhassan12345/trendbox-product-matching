@@ -35,6 +35,10 @@ def _make_hit(rank: int, barcode: str, name: str, confidence: float) -> dict:
         "confidence_color": get_confidence_color(confidence),
         "explanation": f"Mock explanation for {name}",
         "triage": triage(confidence, False, False, "", ""),
+        "query_weight": "",
+        "suggested_weight": "",
+        "size_verdict": "size_unknown",
+        "brand_match": None,
     }
 
 
@@ -319,19 +323,36 @@ def _run_api_endpoint_checks(client: TestClient) -> int | None:
 
     if pending_match_id is not None:
         response = client.post(
-            f"/decision/{pending_match_id}",
-            json={"decision": "approved", "note": "test approval"},
+            "/quality/matches/999999/resolve",
+            json={"action": "reject"},
         )
-        check("POST /decision/{id} status 200", response.status_code == 200, response.text)
-        if response.status_code == 200:
-            decision = DecisionResponse.model_validate(response.json())
-            check("POST /decision schema valid", decision.success is True)
+        check(
+            "POST /quality/matches/{id}/resolve 404 for unknown match",
+            response.status_code == 404,
+            response.text,
+        )
 
-        # Deciding one product resolves it entirely (siblings superseded), so the
-        # single pending product should leave the queue.
+        response = client.post(
+            f"/quality/matches/{pending_match_id}/resolve",
+            json={"action": "reject", "note": "size mismatch test"},
+        )
+        check(
+            "POST /quality/matches/{id}/resolve reject status 200",
+            response.status_code == 200,
+            response.text,
+        )
+        if response.status_code == 200:
+            from api.schemas import QualityResolveResponse
+
+            resolved = QualityResolveResponse.model_validate(response.json())
+            check(
+                "POST /quality/matches/{id}/resolve schema valid",
+                resolved.success is True and resolved.action == "reject",
+            )
+
         response = client.get("/match/next")
         check(
-            "GET /match/next 404 after the only pending product is resolved",
+            "GET /match/next 404 after quality reject resolves pending product",
             response.status_code == 404,
             response.text,
         )
@@ -349,6 +370,64 @@ def _run_api_endpoint_checks(client: TestClient) -> int | None:
     check("POST /decision/{id} 422 for invalid decision", response.status_code == 422)
 
     return pending_match_id
+
+
+def _run_quality_endpoint_checks(client: TestClient) -> None:
+    """Phase 2 quality API: summary, matches validation, pagination cap."""
+    from api.schemas import QualityMatchesResponse, QualitySummaryResponse
+
+    response = client.get("/quality/summary")
+    check("GET /quality/summary status 200", response.status_code == 200, response.text)
+    if response.status_code == 200:
+        summary = QualitySummaryResponse.model_validate(response.json())
+        check(
+            "GET /quality/summary has expected keys",
+            {
+                "size_verified_count",
+                "size_conflict_count",
+                "size_unknown_count",
+                "catalog_integrity_pct",
+                "guardrail_blocked_count",
+            }.issubset(response.json().keys()),
+        )
+        check(
+            "GET /quality/summary counts are non-negative",
+            summary.size_verified_count >= 0
+            and summary.size_conflict_count >= 0
+            and summary.size_unknown_count >= 0,
+        )
+
+    response = client.get("/quality/matches", params={"verdict": "not_a_verdict"})
+    check(
+        "GET /quality/matches invalid verdict -> 422",
+        response.status_code == 422,
+        response.text,
+    )
+
+    response = client.get(
+        "/quality/matches",
+        params={"verdict": "size_unknown", "limit": 999},
+    )
+    check(
+        "GET /quality/matches pagination limit cap status 200",
+        response.status_code == 200,
+        response.text,
+    )
+    if response.status_code == 200:
+        matches = QualityMatchesResponse.model_validate(response.json())
+        check(
+            "GET /quality/matches caps limit at 200",
+            matches.limit == 200,
+            f"limit={matches.limit}",
+        )
+
+    response = client.get("/quality/export", params={"verdict": "size_unknown"})
+    check("GET /quality/export status 200", response.status_code == 200, response.text)
+    if response.status_code == 200:
+        check(
+            "GET /quality/export returns text/csv",
+            "text/csv" in response.headers.get("content-type", ""),
+        )
 
 
 def test_api_integration() -> None:
@@ -370,3 +449,4 @@ def test_api_integration() -> None:
     with TestClient(main.app) as client:
         main.matcher = FakeMatcher()
         _run_api_endpoint_checks(client)
+        _run_quality_endpoint_checks(client)

@@ -159,6 +159,10 @@ Bu değişiklik taze ürünlerde hatalı ceza uygulanmasını önledi.
 | Ort. güven | 0.598 | 0.639 |
 | Otomatik red | 19.400 | 18.173 |
 
+### Paket boyutu kalite kontrolü
+
+Eşleştirme sonrası rank-1 öneriler için kaynak ve aday ürünün paket boyutu (`150 g`, `kg`, `adet` vb.) karşılaştırılır. Boyut uyuşmazlığı (`size_conflict`) otomatik onay bandına hiç düşmez; `TRENDBOX_SIZE_CONFLICT_POLICY=review` ile operatör kuyruğuna, `reject` ile otomatik red bandına yönlendirilir. **Quality** sekmesinden çatışmalar izlenir; `scripts/audit_size_quality.py` veritabanında bütünlük yüzdesini ve hâlâ `auto_approved` kalan çatışmaları raporlar.
+
 ---
 
 ## Çalıştırma

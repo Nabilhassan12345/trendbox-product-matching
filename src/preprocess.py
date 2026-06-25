@@ -253,6 +253,46 @@ def extract_weight(name: str) -> str:
     return ""
 
 
+def weight_pool_eligible(query_weight: str, candidate_weight: str) -> bool:
+    """Return whether a candidate may stay in the retrieval pool (legacy weight tokens)."""
+    if not query_weight:
+        return True
+    if not candidate_weight:
+        return True
+    return query_weight == candidate_weight
+
+
+def pack_pool_eligible_from_names(query_name: str, candidate_name: str) -> bool:
+    """Return whether candidate pack metadata conflicts with the query."""
+    from src.pack_profile import pack_pool_eligible, parse_pack_profile
+
+    return pack_pool_eligible(parse_pack_profile(query_name), parse_pack_profile(candidate_name))
+
+
+def filter_candidates_by_weight(query: str, candidates: "pd.DataFrame") -> "pd.DataFrame":
+    """Drop definite pack-size mismatches from a Stage-1 candidate DataFrame.
+
+    No-op when the query weight is unknown or the frame is empty. If filtering
+    would remove every row, returns the original frame so retrieval still has
+    fallback candidates.
+    """
+    import pandas as pd
+    from src.pack_profile import parse_pack_profile
+
+    query_profile = parse_pack_profile(query)
+    if not query_profile.has_comparable_signal() or candidates.empty:
+        return candidates
+
+    def _row_eligible(row: pd.Series) -> bool:
+        text = str(row.get("name_clean") or row.get("name") or "")
+        return pack_pool_eligible_from_names(query, text)
+
+    filtered = candidates[candidates.apply(_row_eligible, axis=1)]
+    if filtered.empty:
+        return candidates
+    return filtered.reset_index(drop=True)
+
+
 def enrich_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Add ``brand`` and ``weight`` columns derived from product names.
 

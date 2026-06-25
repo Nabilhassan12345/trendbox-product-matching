@@ -112,6 +112,48 @@ def match_source_chip_html(match_source: str | None) -> str:
     return f'<span class="source-chip {cls}">{label}</span>'
 
 
+def match_quality_chip_html(size_verdict: str | None) -> str:
+    """Return a size-verdict badge for match-quality audit cards."""
+    verdict = (size_verdict or "size_unknown").lower()
+    cfg = {
+        "size_conflict": ("#FEE2E2", "#B91C1C", "#FECACA", "SIZE CONFLICT"),
+        "size_verified": ("#D1FAE5", "#047857", "#A7F3D0", "SIZE VERIFIED"),
+        "size_unknown": ("#F3F4F6", "#4B5563", "#E5E7EB", "INCOMPLETE"),
+    }
+    bg, fg, border, label = cfg.get(verdict, cfg["size_unknown"])
+    return (
+        f'<span style="display:inline-flex; align-items:center; gap:5px; '
+        f"font-size:10px; font-weight:700; letter-spacing:0.06em; "
+        f"padding:4px 10px; border-radius:6px; background:{bg}; color:{fg}; "
+        f'border:1px solid {border};">{label}</span>'
+    )
+
+
+def weight_pill_html(weight: str | None, *, tone: str = "unknown") -> str:
+    """Return a weight pill — green=equal, red=mismatch, grey=unknown."""
+    styles = {
+        "equal": ("#D1FAE5", "#047857", "#A7F3D0"),
+        "mismatch": ("#FEE2E2", "#B91C1C", "#FECACA"),
+        "unknown": ("#F3F4F6", "#6B7280", "#E5E7EB"),
+    }
+    bg, fg, border = styles.get(tone, styles["unknown"])
+    label = weight.strip() if weight and str(weight).strip() else "—"
+    return (
+        f'<span style="display:inline-block; font-size:12px; font-weight:600; '
+        f"padding:4px 10px; border-radius:999px; background:{bg}; color:{fg}; "
+        f'border:1px solid {border};">{label}</span>'
+    )
+
+
+def weight_tone(query_weight: str | None, suggested_weight: str | None) -> str:
+    """Map query/suggested weights to pill tone for side-by-side cards."""
+    query = (query_weight or "").strip()
+    suggested = (suggested_weight or "").strip()
+    if query and suggested:
+        return "equal" if query == suggested else "mismatch"
+    return "unknown"
+
+
 def progress_bar_html(
     value: float,
     height: int = 4,

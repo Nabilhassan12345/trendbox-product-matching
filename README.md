@@ -27,6 +27,7 @@ Built for a mixed catalogue of **100,585 rows** where duplicate spellings, missi
 - [Project layout](#project-layout)
 - [Testing & CI](#testing--ci)
 - [Configuration](#configuration)
+- [Match Quality](#match-quality)
 - [Documentation](#documentation)
 - [License](#license)
 
@@ -270,6 +271,7 @@ First run: loads `data/mix_products.csv`, builds or restores indexes, batch-matc
 | Force index rebuild | `python pipeline.py --rebuild` |
 | Batch match only (no API/UI) | `python scripts/run_batch.py` |
 | Catalogue quality report | `python scripts/profile_data.py` |
+| Size quality audit (DB) | `python3 scripts/audit_size_quality.py` |
 | Recall@k + threshold sweep | `python scripts/evaluate.py --max-queries 1000` |
 | API only | `uvicorn api.main:app --port 8000` |
 | UI only | `streamlit run ui/app.py` |
@@ -291,6 +293,9 @@ Copy `.env.example` → `.env` to override paths and ports. After changing refer
 | `POST` | `/matches/{match_id}/reopen` | Re-queue auto-rejected match |
 | `GET` | `/matches/recent` | Recent resolved matches by outcome |
 | `POST` | `/batch_process` | Run matching for all unmatched products |
+| `GET` | `/quality/summary` | Rank-1 size-verdict aggregates |
+| `GET` | `/quality/matches` | Paginated matches by size verdict |
+| `POST` | `/quality/matches/{id}/resolve` | Reject or reopen a quality conflict |
 
 Interactive schema: http://localhost:8000/docs
 
@@ -313,7 +318,7 @@ ui/
   app.py                    # Streamlit home
   pages/                    # Review · Analytics · Pipeline
   utils/                    # theme · layout · components · charts
-scripts/                    # evaluate · profile_data · run_batch
+scripts/                    # evaluate · profile_data · run_batch · audit_size_quality
 tests/                      # pytest suites + run_all_tests.py
 docs/                       # DATA_PIPELINE.md · CALISMA_RAPORU.md
 data/
@@ -349,6 +354,41 @@ All variables are optional. Copy `.env.example` to `.env`:
 | `TRENDBOX_API_URL` | `http://localhost:8000` | API base URL for the UI |
 | `TRENDBOX_API_PORT` | `8000` | API port (`pipeline.py`) |
 | `TRENDBOX_UI_PORT` | `8501` | Streamlit port (`pipeline.py`) |
+| `TRENDBOX_SIZE_CONFLICT_POLICY` | `review` | Pack-size conflict triage: `review` or `reject` |
+
+---
+
+## Match Quality
+
+Rank-1 matches are scored for **pack-size consistency** between the unmatched product and the top suggestion. Extracted weights (`150 g`, `kg`, `adet`, …) drive three verdicts:
+
+| Verdict | Meaning |
+|---------|---------|
+| `size_verified` | Both sides have a pack size and they match |
+| `size_conflict` | Both sides have a pack size and they differ |
+| `size_unknown` | Weight missing on one or both sides |
+
+**Guardrails (Phase 1+):** `size_conflict` never receives `auto_approve`. Triage follows `TRENDBOX_SIZE_CONFLICT_POLICY`:
+
+- `review` (default) — conflict goes to the operator queue
+- `reject` — conflict is `auto_rejected`
+
+**Retrieval hardening:** When the query pack size is known, Stage 1 TF-IDF and the embedding rerank pool **exclude definite weight mismatches** (unknown candidate weights are kept for recall).
+
+**Operator surfaces:**
+
+- **Review** — amber banner on `size_conflict`, green caption on `size_verified`
+- **Quality** (`ui/pages/04_Quality.py`) — KPIs, conflict list, reject/reopen actions
+- **Home** — catalog integrity % and conflict count from `/quality/summary`
+
+**Audit CLI** (read-only):
+
+```bash
+python3 scripts/audit_size_quality.py
+python3 scripts/audit_size_quality.py --csv data/reports/size_conflicts_auto_approved.csv
+```
+
+Expect **zero** rank-1 rows with `size_conflict` + `auto_approved` after guardrails are active.
 
 ---
 

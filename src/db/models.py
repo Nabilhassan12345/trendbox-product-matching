@@ -78,6 +78,11 @@ class Match(Base):
     confidence_label = Column(String, nullable=False)
     rank = Column(Integer, nullable=False)
     status = Column(String, nullable=False, default="pending", index=True)
+    query_weight = Column(String, nullable=True)
+    suggested_weight = Column(String, nullable=True)
+    size_verdict = Column(String, nullable=True, index=True)
+    brand_match = Column(Boolean, nullable=True)
+    guardrail_applied = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=_utcnow)
 
     unmatched_product = relationship(
@@ -103,6 +108,11 @@ class Match(Base):
             "confidence_label": self.confidence_label,
             "rank": self.rank,
             "status": self.status,
+            "query_weight": self.query_weight,
+            "suggested_weight": self.suggested_weight,
+            "size_verdict": self.size_verdict,
+            "brand_match": self.brand_match,
+            "guardrail_applied": self.guardrail_applied,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
         if include_products:
